@@ -1,0 +1,16 @@
+This log is discontinued, for further reference see the yealink.c header.
+
+20060430:
+  Toshiharu Ohno: - Fixed key event initialization bug.
+
+20051230:
+  - sync with kernel 2.6.16
+
+r20051228:
+  - More selective usb_device table, removal of usb_match function.
+
+r0816 :
+  - Folow sysfs API changes that whent in kernel 2.6.13
+
+r0802 :
+  - Is considered usable for kernel versions up to 2.6.12.x
