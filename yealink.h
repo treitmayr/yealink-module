@@ -2,6 +2,8 @@
  * drivers/usb/input/yealink.h
  *
  * Copyright (c) 2005,2006 Henk Vergonet <Henk.Vergonet@gmail.com>
+ *               2008      Thomas Reitmayr <treitmayr@devbase.at>
+ *
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -15,7 +17,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #ifndef INPUT_YEALINK_H
 #define INPUT_YEALINK_H
@@ -24,7 +26,9 @@
  * can be controlled like LCD, LED, dialtone and the ringtone.
  */
 
-struct yld_ctl_packet {
+/* "Generation 1" models use 16 byte packets */
+
+struct yld_ctl_packet_g1 {
 	u8	cmd;		/* command code, see below */
 	u8	size;		/* 1-11, size of used data bytes. */
 	u16	offset;		/* internal packet offset */
@@ -32,7 +36,37 @@ struct yld_ctl_packet {
 	s8	sum;		/* negative sum of 15 preceding bytes */
 } __attribute__ ((packed));
 
-#define USB_PKT_LEN	sizeof(struct yld_ctl_packet)
+#define USB_PKT_LEN_G1	sizeof(struct yld_ctl_packet_g1)
+
+/* "Generation 2" models use 8 byte packets */
+
+struct yld_ctl_packet_g2 {
+	u8	cmd;		/* command code, see below */
+	u8	data[6];
+	s8	sum;		/* negative sum of 7 preceding bytes */
+} __attribute__ ((packed));
+
+#define USB_PKT_LEN_G2	sizeof(struct yld_ctl_packet_g2)
+
+union yld_ctl_packet {
+	u8	cmd;		/* command code is always the first byte */
+	struct	yld_ctl_packet_g1 g1;
+	struct	yld_ctl_packet_g2 g2;
+};
+
+enum yld_ctl_protocols {
+  yld_ctl_protocol_g1,
+  yld_ctl_protocol_g2
+};
+
+/* version ranges determined according to
+ * http://www.devbase.at/svn/view.cgi/yealink-logs/version-numbers.txt?root=experimental
+ */
+#define YLD_IS_P1K(v)	((v) >= 0x0100 && (v) <= 0x01ff)
+#define YLD_IS_P4K(v)	((v) >= 0x0230 && (v) <= 0x02ff)
+#define YLD_IS_B2K(v)	(((v) >= 0x0520 && (v) <= 0x053f) || \
+			 ((v) >= 0x0570 && (v) <= 0x058f))
+#define YLD_IS_B3K(v)	((v) >= 0x0540 && (v) <= 0x056f)
 
 /* The following yld_ctl_packet's are available: */
 
@@ -45,16 +79,33 @@ struct yld_ctl_packet {
  */
 #define CMD_INIT		0x8e
 
-/* Request device identification
+/* Read version
  *
- * cmd		0x8d
- * size		1
+ * cmd		0x87
+ * size		2
  * offset	0
- * data[0]	on return:
- *			0x02	B2K
- *			0x0c	P1K	??
+ * data		0,0
  */
-#define CMD_DEVICE_IDENT	0x8d
+#define CMD_VERSION		0x87
+
+/* Request scan of attached PSTN
+ *
+ * models       B2K (not B3K!)
+ * cmd          0x8d
+ * size         1
+ * offset       0
+ * data[0]      on return: 
+ *                bit 0: 0 .. PSTN ring off or ring pause
+                         1 .. PSTN ring on
+ *                bit 1: 0 .. on hook
+ *                       1 .. off hook
+ * Note: Bit 0 turns on and off along with the PSTN ring signal. Then end
+ *       of the ring sequence (other party hung up) is detected when bit 0
+ *       stays 0 for a few seconds.
+ *       If not already in PSTN mode, SW should switch to PSTN immediately
+ *       when detecting the first ring signal (via CMD_PSTN_SWITCH).
+ */
+#define CMD_HANDSET	0x8d
 
 /* Request key scan
  *
@@ -77,11 +128,11 @@ struct yld_ctl_packet {
 
 /* Request Hook scan
  *
+ * models	P3K, P4K, V1K
  * cmd		0x8b
  * size		1
  * offset	0
- * data[0]	on return returns the hook status
- *		0xff on hook / 0xef off hook
+ * data[0]	on return: bit 4: 1 .. on hook / 0 .. off hook
  */
 #define	CMD_HOOKPRESS		0x8b
 
@@ -96,22 +147,36 @@ struct yld_ctl_packet {
 
 /* Set led
  *
+ * models       P1K, B2K, B3K
  * cmd		0x05
  * size		1
  * offset	0
- * data[0]	0 OFF / 1 ON
+ * data[0]	0 OFF / 1 ON (P1K)
+ * data[0,1]	"00 ff" OFF / "ff 00" ON (B2K, B3K)
  */
 #define CMD_LED			0x05
 
 /* Set ringtone volume
  *
+ * models       P1K, P1KH, ...(?)
  * cmd		0x11
  * size		1
  * offset	0
  * data[0]	0-0xff  volume
  */
 #define CMD_RING_VOLUME		0x11
-#define CMD_SPEAKER		0x11
+
+/* Turn on the speaker for ringing and hands-free operation
+ *
+ * models       P3K, P4K, V1K, ...(?)
+ * cmd		0x0c
+ * size		1
+ * offset	0
+ * data[0]	0 .. off, 1 .. on
+ * Note: The P4K has no buzzer, so the speaker and an audio ring tone
+ *       have to be used for ringing.
+ */
+#define CMD_SPEAKER             0x0c
 
 /* Set ringtone notes
  *
@@ -124,6 +189,7 @@ struct yld_ctl_packet {
 
 /* Sound ringtone via the speaker on the back
  *
+ * models       P1K, P1KH, ...(?)
  * cmd		0x03
  * size		1
  * offset	0
@@ -133,6 +199,7 @@ struct yld_ctl_packet {
 
 /* Sound dial tone via the ear speaker
  *
+ * models       B2K, B3K, P3K, P4K, V1K, ...(?)
  * cmd		0x09
  * size		1
  * offset	0
@@ -142,31 +209,45 @@ struct yld_ctl_packet {
 
 /* LCD backlight control
  *
- * cmd      0x12
- * size     1
- * offset   0
- * data[0]  0 OFF / 1 ON
- * data[0]  returns last key scan code (???)
+ * models	P3K, P4K, V1K
+ * cmd		0x12
+ * size		1
+ * offset	0
+ * data[0]	0 OFF / 1 ON
  */
 #define CMD_LCD_BACKLIGHT	0x12
 
 /* B2K Ring control
  *
- * cmd      0x01
- * size     1
- * offset   0
- * data[0]  0 OFF / 1 ON
+ * models	B2K, B3K
+ * cmd		0x01
+ * size		1
+ * offset	0
+ * data[0]	0 OFF / 1 ON
+ * Note: For a periodic ring tone this bit has to be turned on and off.
  */
 #define CMD_B2K_RING		0x01
 
 /* B2K PSTN/USB switch
  *
- * cmd      0x0e
- * size     1
- * offset   0
- * data[0]  0 USB / 1 PSTN
+ * models	B2K, B3K
+ * cmd		0x0e
+ * size		1
+ * offset	0
+ * data[0]	0 USB / 1 PSTN
+ * Note: It is recommended to turn this on (PSTN) when the program shuts down.
+ *       For the B3K if call forwarding is enabled, this has to be 0.
  */
 #define CMD_PSTN_SWITCH		0x0e
+
+/* Overload state
+ *
+ * models	?
+ * state	0xfd
+ * Note: This state seems to be replied whenever the received packet had an
+ *       invalid checksum or some other internal error occurred in the phone.
+ */
+#define STATE_BAD_PKT		0xfd
 
 
 #endif /* INPUT_YEALINK_H */
@@ -261,14 +342,20 @@ struct yld_ctl_packet {
  */
 #define LCD_LINE4_OFFSET	LCD_LINE3_OFFSET + LCD_LINE3_SIZE
 
-	_PIC('.', offsetof(struct yld_status, led)	, 0x01, "LED"	   ),
-	_PIC('.', offsetof(struct yld_status, dialtone) , 0x01, "DIALTONE" ),
-	_PIC('.', offsetof(struct yld_status, ringtone) , 0x24, "RINGTONE" ),
+	_PIC('.', offsetof(struct yld_status, led) -
+		  offsetof(struct yld_status, lcd)	, 0x01, "LED"	   ),
+	_PIC('.', offsetof(struct yld_status, dialtone) -
+		  offsetof(struct yld_status, lcd)	, 0x01, "DIALTONE" ),
+	_PIC('.', offsetof(struct yld_status, ringtone) -
+		  offsetof(struct yld_status, lcd)	, 0x24, "RINGTONE" ),
 	/* P4K specific: */
-	_PIC('.', offsetof(struct yld_status, backlight), 0x01, "BACKLIGHT"),
-	_PIC('.', offsetof(struct yld_status, speaker)  , 0x10, "SPEAKER"  ),
+	_PIC('.', offsetof(struct yld_status, backlight) -
+		  offsetof(struct yld_status, lcd)	, 0x01, "BACKLIGHT"),
+	_PIC('.', offsetof(struct yld_status, speaker) -
+		  offsetof(struct yld_status, lcd)	, 0x01, "SPEAKER"  ),
 	/* B2K specific: */
-	_PIC('.', offsetof(struct yld_status, pstn)	, 0x01, "PSTN"	   ),
+	_PIC('.', offsetof(struct yld_status, pstn) -
+		  offsetof(struct yld_status, lcd)	, 0x01, "PSTN"	   ),
 
 #undef _SEG
 #undef _PIC

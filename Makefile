@@ -1,7 +1,7 @@
 #MAKE_OPTS=-C /usr/src/linux SUBDIRS=`pwd` V=1
 MAKE_OPTS=-C /usr/src/linux SUBDIRS=`pwd`
 PATH_SYSFS :=$(shell find /sys/ -name get_icons | sed 's/\/get_icons//')
-#CFLAGS+= -DDEBUG
+EXTRA_CFLAGS += -DDEBUG -O0 -g
 
 obj-m += yealink.o
 
