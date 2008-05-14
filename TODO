@@ -1,0 +1,5 @@
+In order of priority:
+- cleaner support for multiple devices
+- Test the P4K functionallity
+- Test the /sys/.../ringtone interface
+- New user space API?
