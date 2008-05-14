@@ -27,3 +27,11 @@ test: modules
 
 tar:
 	tar jcvf yealink.tar.bz2 README TODO Makefile *.[ch]
+
+dist:
+	vers=`grep 'define  *DRIVER_VERSION' yealink.c | sed 's/.*-\\([0-9]*\\).*/\\1/'` ; \
+	echo "creating yealink-module-$${vers}.tar.bz2"; \
+	mkdir yealink-module-$${vers}; \
+	cp README TODO Makefile *.[ch] yealink-module-$${vers}; \
+	tar jcvf yealink-module-$${vers}.tar.bz2 yealink-module-$${vers}; \
+	rm -Rf yealink-module-$${vers}
