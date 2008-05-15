@@ -147,11 +147,11 @@ enum yld_ctl_protocols {
 
 /* Set led
  *
- * models       P1K, B2K, B3K
+ * models       P1K, P1KH, B2K, B3K
  * cmd		0x05
  * size		1
  * offset	0
- * data[0]	0 OFF / 1 ON (P1K)
+ * data[0]	1 OFF / 0 ON (P1K, P1KH)
  * data[0,1]	"00 ff" OFF / "ff 00" ON (B2K, B3K)
  */
 #define CMD_LED			0x05
@@ -193,7 +193,8 @@ enum yld_ctl_protocols {
  * cmd		0x03
  * size		1
  * offset	0
- * data[0]	0 OFF / 0x24 ON
+ * data[0]	0 OFF / 0x24 ON (P1K)
+ *              0 OFF / 0x01 ON (P1KH)
  */
 #define CMD_RINGTONE		0x03
 
@@ -347,7 +348,7 @@ enum yld_ctl_protocols {
 	_PIC('.', offsetof(struct yld_status, dialtone) -
 		  offsetof(struct yld_status, lcd)	, 0x01, "DIALTONE" ),
 	_PIC('.', offsetof(struct yld_status, ringtone) -
-		  offsetof(struct yld_status, lcd)	, 0x24, "RINGTONE" ),
+		  offsetof(struct yld_status, lcd)	, 0x01, "RINGTONE" ),
 	/* P4K specific: */
 	_PIC('.', offsetof(struct yld_status, backlight) -
 		  offsetof(struct yld_status, lcd)	, 0x01, "BACKLIGHT"),
