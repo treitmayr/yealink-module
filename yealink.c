@@ -665,14 +665,14 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 		return -ENODEV;
 	}
 
-	proto = yld->model->protocol;
-	ctl_data = yld->ctl_scan.ctl_data;
-	ix = yld->stat_ix;
-
 	if (timer_pending(&yld->timer)) {
 		/* this should really only happen for G2! */
 		return 0;
 	}
+
+	proto = yld->model->protocol;
+	ctl_data = yld->ctl_scan.ctl_data;
+	ix = yld->stat_ix;
 
 	data = (proto == yld_ctl_protocol_g1) ?
 		ctl_data->g1.data : ctl_data->g2.data;
@@ -715,8 +715,8 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 				ctl_data->g1.size = 2;
 				sum -= 1;
 			} else {
-				data[0] = val;
-				sum -= val;
+				data[0] = (val) ? 0 : 1;	/* invert */
+				sum -= data[0];
 				if (proto == yld_ctl_protocol_g1) {
 					ctl_data->g1.size = 1;
 					sum--;
@@ -736,8 +736,11 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 			if (yld->model->name == p1k_model ||
 			    yld->model->name == p1kh_model) {
 				ctl_data->cmd	= CMD_RINGTONE;
-				data[0] = val;
-				sum -= val;
+				if (yld->model->name == p1k_model)
+					data[0] = (val) ? 0x24 : 0x00;
+				else
+					data[0] = (val) ? 0x01 : 0x00;
+				sum -= data[0];
 				if (proto == yld_ctl_protocol_g1) {
 					ctl_data->g1.size = 1;
 					sum--;
@@ -1000,7 +1003,12 @@ static int input_ev(struct input_dev *dev, unsigned int type,
 
 static int input_open(struct input_dev *dev)
 {
-	struct yealink_dev *yld = input_get_drvdata(dev);
+	struct yealink_dev *yld =
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
+				dev->private;
+#else
+				input_get_drvdata(dev);
+#endif
 	enum yld_ctl_protocols proto;
 	int i, ret;
 
@@ -1036,7 +1044,12 @@ static int input_open(struct input_dev *dev)
 
 static void input_close(struct input_dev *dev)
 {
-	struct yealink_dev *yld = input_get_drvdata(dev);
+	struct yealink_dev *yld =
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
+				dev->private;
+#else
+				input_get_drvdata(dev);
+#endif
 
 	if (timer_pending(&yld->timer))
 		del_timer(&yld->timer);
