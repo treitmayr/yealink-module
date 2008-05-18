@@ -45,7 +45,7 @@
  *   20050531 henk	Added led, LCD, dialtone and sysfs interface.
  *   20050610 henk	Cleanups, make it ready for public consumption.
  *   20050630 henk	Cleanups, fixes in response to comments.
- *   20050701 henk	sysfs write serialisation, fix potential unload races
+ *   20050701 henk	sysfs write serialization, fix potential unload races
  *   20050801 henk	Added ringtone, restructure USB
  *   20050816 henk	Merge 2.6.13-rc6
  *   20060220 henk	Experimental P4K support
@@ -54,8 +54,15 @@
  *   20060503 Henk	Added privacy, only allow user and group access to sysfs
  *   20060830 Henk	Proper urb cleanup cycle, thanks Ivan Jensen for
  *   			pointing this out.
- *   20080514 Thomas	Added support for P1KH, auto-detect handset model,
- *			added B2K keymap
+ *   20080518 Thomas	Added support for P1KH, auto-detect handset model,
+ *			added B2K keymap,
+ *			thanks mmikel for testing with the P1KH.
+ *
+ * TODO:
+ *   - P1KH: Make sure an interrupt is generated whenever it is expected.
+ *   - P1K: Get rid of warning due to double-submission of irq urb.
+ *   - Protect operations on the timer (may cause kernel panic!?).
+ *   - P1KH: Better understand how the ring notes have to be set up.
  */
 
 #include <linux/kernel.h>
@@ -74,7 +81,7 @@
 #error "Need kernel version 2.6.21 or higher"
 #endif
 
-#define DRIVER_VERSION "yld-20080514"
+#define DRIVER_VERSION "yld-20080518"
 #define DRIVER_AUTHOR "Henk Vergonet, Thomas Reitmayr"
 #define DRIVER_DESC "Yealink phone driver"
 
@@ -82,25 +89,28 @@
 #define USB_YEALINK_PRODUCT_ID1	0xb001
 #define USB_YEALINK_PRODUCT_ID2	0xb700
 
-#define YEALINK_POLLING_FREQUENCY	10	/* in [Hz] */
+#define YEALINK_POLLING_DELAY		100	/* in [ms] */
+#define YEALINK_COMMAND_DELAY_G2	16	/* in [ms] */
 
 struct yld_status {
-	u8	init;
 	u8	version;
+	u8	init;
+	u8	keynum;
+	u8	ringvol;
+	u8	ringnote_mod;
+	u8	ringtone;
+	u8	dialtone;
 	u8	lcd[24];
 	u8	led;
-	u8	dialtone;
-	u8	ringtone;
 	u8	backlight;
 	u8	speaker;
 	u8	pstn;
-	u8	keynum;
 } __attribute__ ((packed));
 
 /*
  * Register the LCD segment and icon map
  */
-#define _LOC(k,l)	{ .a = (k), .m = (l) }
+#define _LOC(k,l)	{ .a = ((k)+offsetof(struct yld_status, lcd)), .m = (l) }
 #define _SEG(t, a, am, b, bm, c, cm, d, dm, e, em, f, fm, g, gm)	\
 	{ .type	= (t),							\
 	  .u = { .s = {	_LOC(a, am), _LOC(b, bm), _LOC(c, cm),		\
@@ -108,7 +118,7 @@ struct yld_status {
 			_LOC(f, fm) } } }
 #define _PIC(t, h, hm, n)						\
 	{ .type	= (t),							\
- 	  .u = { .p = { .name = (n), .a = (h), .m = (hm) } } }
+ 	  .u = { .p = { .name = (n), .a = ((h)+offsetof(struct yld_status, lcd)), .m = (hm) } } }
 
 static const struct lcd_segment_map {
 	char	type;
@@ -140,15 +150,17 @@ struct yld_ctl_chan {
 };
 
 struct yealink_dev {
-	struct input_dev	*idev;		/* input device */
 	struct usb_device	*udev;		/* usb device */
 	struct usb_interface	*interface;	/* interface for the device */
+
+	struct input_dev	*idev;		/* input device */
+	int			input_refcnt;
 
 	struct timer_list	timer;		/* timer for key/hook scans */
 	unsigned long		next_expires;
 	struct semaphore	update_sem;	/* G2 transfer protection */
 
-	struct model_info *model;
+	struct model_info	*model;
 
 	/* irq input channel */
 	union yld_ctl_packet	*irq_data;
@@ -160,20 +172,22 @@ struct yealink_dev {
 	struct yld_ctl_chan	ctl_scan;
 
 	/* control output channel for all other commands */
-	struct yld_ctl_chan	ctl_cmd;
+	//struct yld_ctl_chan	ctl_cmd;
 
 	char phys[64];			/* physical device path */
 
 	u8 lcdMap[ARRAY_SIZE(lcdMap)];	/* state of LCD, LED ... */
-	int key_code;			/* last reported key	 */
-
-	int	stat_ix;
-	u8	last_cmd;
+	int	key_code;		/* last reported key	 */
+	u8	last_cmd;		/* last scan command: key/hook */
 	u8	hookstate;		/* P4K hookstate	*/
+	int	stat_ix;		/* index in master/copy */
 	union {
 		struct yld_status s;
 		u8		  b[sizeof(struct yld_status)];
 	} master, copy;
+	int	notes_ix;		/* index in ring_notes */
+	int	notes_len;		/* number of bytes in ring_notes[] */
+	u8	*ring_notes;		/* ptr. to array of ring notes */
 };
 
 static char p1k_model[]  = "P1K";
@@ -239,7 +253,7 @@ static int setChar(struct yealink_dev *yld, int el, int chr)
 	yld->lcdMap[el] = chr;
 
 	if (lcdMap[el].type == '.') {
-		a = lcdMap[el].u.p.a + offsetof(struct yld_status, lcd);
+		a = lcdMap[el].u.p.a;
 		m = lcdMap[el].u.p.m;
 		if (chr != ' ')
 			yld->master.b[a] |= m;
@@ -255,7 +269,7 @@ static int setChar(struct yealink_dev *yld, int el, int chr)
 		if (m == 0)
 			continue;
 
-		a = lcdMap[el].u.s[i].a + offsetof(struct yld_status, lcd);
+		a = lcdMap[el].u.s[i].a;
 		if (val & 1)
 			yld->master.b[a] |= m;
 		else
@@ -264,6 +278,89 @@ static int setChar(struct yealink_dev *yld, int el, int chr)
 	}
 	return 0;
 };
+
+/*******************************************************************************
+ * Yealink ringtone interface
+ ******************************************************************************/
+
+static u8 default_ringtone_g1[] = {
+	0xEF,			/* volume [0-255] */
+	0xFB, 0x1E, 0x00, 0x0C,	/* 1250 [hz], 12/100 [s] */
+	0xFC, 0x18, 0x00, 0x0C,	/* 1000 [hz], 12/100 [s] */
+	0xFB, 0x1E, 0x00, 0x0C,
+	0xFC, 0x18, 0x00, 0x0C,
+	0xFB, 0x1E, 0x00, 0x0C,
+	0xFC, 0x18, 0x00, 0x0C,
+	0xFB, 0x1E, 0x00, 0x0C,
+	0xFC, 0x18, 0x00, 0x0C,
+	0xFF, 0xFF, 0x01, 0x90,	/* silent, 400/100 [s] */
+	0x00, 0x00		/* end of sequence */
+};
+
+#if 0
+/* not working: */
+static u8 default_ringtone_g2[] = {
+	0xEF,		/* volume [0-255] */
+	0x1E, 0x0C,	/* 1250 [hz], 12/100 [s] */
+	0x18, 0x0C,	/* 1000 [hz], 12/100 [s] */
+	0x1E, 0x0C,
+	0x18, 0x0C,
+	0x1E, 0x0C,
+	0x18, 0x0C,
+	0x1E, 0x0C,
+	0x18, 0x0C,
+	0xFF, 0xFE,	/* silent, ? [s] */
+	0x00, 0x00	/* end of sequence */
+};
+#endif
+static u8 default_ringtone_g2[] = {
+	0xFF,		/* volume [0-255] */
+	0x1E, 0x0C,	/* 1250 [hz], 12/100 [s] */
+	0x18, 0x0C,	/* 1000 [hz], 12/100 [s] */
+	0x00, 0x00	/* end of sequence */
+};
+
+static int set_ringnotes(struct yealink_dev *yld, u8 *buf, size_t size)
+{
+	int	eos;		/* end of sequence */
+	int	i;
+
+	if ((buf == NULL) || (size == 0))
+		return 0;
+
+	/* adjust the volume */
+	yld->master.s.ringvol = buf[0];
+	if (size == 1)		/* do not touch the ring notes */
+		return 0;
+
+	buf++;
+	size--;
+	if (yld->ring_notes != NULL) {
+		kfree(yld->ring_notes);
+		yld->ring_notes = NULL;
+	}
+	yld->ring_notes = kzalloc(size + 2, GFP_KERNEL);
+	if (!yld->ring_notes)
+		return -ENOMEM;
+
+	i = 0;
+	while (i < (size - 1)) {
+		yld->ring_notes[i] = buf[i];
+		yld->ring_notes[i+1] = buf[i+1];
+		eos = (buf[i] == 0) && (buf[i+1] == 0);
+		i += 2;
+		if (eos)
+			break;
+	}
+	if (!eos) {
+		/* create the end-of-sequence marker */
+		yld->ring_notes[i++] = 0;
+		yld->ring_notes[i++] = 0;
+	}
+	yld->notes_len = i;
+	yld->notes_ix = 0;
+	return 0;
+}
 
 /*******************************************************************************
  * Yealink key interface
@@ -486,116 +583,39 @@ static void report_key(struct yealink_dev *yld, int key)
  * Yealink usb communication interface
  ******************************************************************************/
 
-static int yealink_cmd(struct yealink_dev *yld, union yld_ctl_packet *p)
-{
-	enum yld_ctl_protocols proto;
-	u8	*buf = (u8 *)p;
-	int	i, len, ret;
-	u8	sum = 0;
+/* Description of USB message and timer sequence:
 
-	if (!yld->model)
-		return -ENODEV;
-
-	proto = yld->model->protocol;
-	
-	len = (proto == yld_ctl_protocol_g1) ? USB_PKT_LEN_G1 : USB_PKT_LEN_G2;
-	for (i = 0; i < len - 1; i++)
-		sum -= buf[i];
-
-	if (proto == yld_ctl_protocol_g1)
-		p->g1.sum = sum;
-	else
-		p->g2.sum = sum;
-
-	ret = usb_control_msg(yld->udev,
-			usb_sndctrlpipe(yld->udev, 0),
-			USB_REQ_SET_CONFIGURATION,
-			USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_OUT,
-			0x200, 3,
-			p, len,
-			USB_CTRL_SET_TIMEOUT);
-	if (ret < 0) {
-		err("%s - usb_control_msg failed %d", __FUNCTION__, ret);
-		return ret;
-	}
-	return 0;
-}
-
-static u8 default_ringtone_g1[] = {
-	0xEF,			/* volume [0-255] */
-	0xFB, 0x1E, 0x00, 0x0C,	/* 1250 [hz], 12/100 [s] */
-	0xFC, 0x18, 0x00, 0x0C,	/* 1000 [hz], 12/100 [s] */
-	0xFB, 0x1E, 0x00, 0x0C,
-	0xFC, 0x18, 0x00, 0x0C,
-	0xFB, 0x1E, 0x00, 0x0C,
-	0xFC, 0x18, 0x00, 0x0C,
-	0xFB, 0x1E, 0x00, 0x0C,
-	0xFC, 0x18, 0x00, 0x0C,
-	0xFF, 0xFF, 0x01, 0x90,	/* silent, 400/100 [s] */
-	0x00, 0x00		/* end of sequence */
-};
-
-static u8 default_ringtone_g2[] = {
-	0xEF,		/* volume [0-255] */
-	0x1E, 0x0C,	/* 1250 [hz], 12/100 [s] */
-	0x18, 0x0C,	/* 1000 [hz], 12/100 [s] */
-	0x1E, 0x0C,
-	0x18, 0x0C,
-	0x1E, 0x0C,
-	0x18, 0x0C,
-	0x1E, 0x0C,
-	0x18, 0x0C,
-	0xFF, 0xFE,	/* silent, ? [s] */
-	0x00, 0x00	/* end of sequence */
-};
-
-static int yealink_set_ringtone(struct yealink_dev *yld, u8 *buf, size_t size)
-{
-	enum	yld_ctl_protocols proto;
-	union	yld_ctl_packet *p = yld->ctl_cmd.ctl_data;
-	int	ix, len;
-
-	if (!yld->model)
-		return -ENODEV;
-	if (size <= 0)
-		return -EINVAL;
-
-	proto = yld->model->protocol;
-
-	/* Set the ringtone volume */
-	memset(p, 0, sizeof(*p));
-	p->cmd = CMD_RING_VOLUME;
-	if (proto == yld_ctl_protocol_g1) {
-		p->g1.size	= 1;
-		p->g1.data[0]	= buf[0];
-	} else {
-		p->g2.data[0]	= buf[0];
-	}
-	yealink_cmd(yld, p);
-
-	buf++;
-	size--;
-
-	p->cmd = CMD_RING_NOTE;
-	ix = 0;
-	while (size != ix) {
-		len = size - ix;
-		if (proto == yld_ctl_protocol_g1) {
-			if (len > sizeof(p->g1.data))
-				len = sizeof(p->g1.data);
-			p->g1.size   = len;
-			p->g1.offset = cpu_to_be16(ix);
-			memcpy(p->g1.data, &buf[ix], len);
-		} else {
-			if (len > sizeof(p->g2.data))
-				len = sizeof(p->g2.data);
-			memcpy(p->g2.data, &buf[ix], len);
-		}
-		yealink_cmd(yld, p);
-		ix += len;
-	}
-	return 0;
-}
+   P1K/B2K/P4K:
+   ------------
+   1. submit control message
+   2. callback control message
+   3.   > if control message was INIT/VERSION/KEY/HOOK submit irq message
+   4.     callback irq message
+   5. start timer to wait until YEALINK_POLLING_DELAY has expired since 1
+   6. timer expires, goto step 1
+   
+   This loop is executed continuously scanning the keypad/hook in regular
+   intervals. No control message may be submitted from outside this loop.
+   
+   P1KH:
+   -----
+   IRQ Endpoint:
+     1. submit irq message
+     2. callback irq message
+     3. goto step 1
+   Control Endpoint:
+     1. submit control message
+     2. callback control message
+     3. start timer to wait until YEALINK_COMMAND_DELAY_G2 has expired since 2
+        Note: For INIT/VERSION the delay is multiplied by 4!
+     4. timer expires, goto step 1
+   
+   The loop of the control endpoint is initiated when the driver is loaded or
+   by the sysfs interface functions. It is important to decrement a protecting
+   semaphore before submitting the first control message.
+   Once all changes are updated, the semaphore is released (in interrupt
+   context) and the loop terminates.
+ */
 
 /* Submit a delayed control message
  * 
@@ -606,24 +626,40 @@ static int yealink_set_ringtone(struct yealink_dev *yld, u8 *buf, size_t size)
  * 
  * Note: After invoking this function updates to LCD/LED/buzzer/.. are
  * delayed until the timer expires.
+ * 
+ * G1: relative = 1
+ * G2: relative = 0
  */
-static int delayed_submit(struct yealink_dev *yld, int delayed, int mem_flags) {
+static int delayed_submit(struct yealink_dev *yld, int mem_flags,
+				int delay, int relative) {
 	int ret;
 
-	if (delayed)
-		delayed = (yld->next_expires > jiffies);
+	if (delay == 0)
+		return usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
 
-	if (delayed) {
-		mod_timer(&yld->timer, yld->next_expires);
-		yld->next_expires += HZ / YEALINK_POLLING_FREQUENCY;
-		ret = 0;
-	} else {
-		if (timer_pending(&yld->timer))	{	/* should not happen */
-			del_timer(&yld->timer);
-			err("Timer pending already!");
+	delay = (HZ * delay + 999) / 1000;	/* calculate ticks */
+	ret = 0;
+	if (relative) {
+		if (yld->next_expires > jiffies) {
+			mod_timer(&yld->timer, yld->next_expires);
+			yld->next_expires += delay;
+		} else {
+			if (timer_pending(&yld->timer))	{
+				/* should not happen! */
+				del_timer(&yld->timer);
+				err("Timer was pending already!");
+			}
+			yld->next_expires = jiffies + delay;
+			ret = usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
 		}
-		yld->next_expires = jiffies + HZ / YEALINK_POLLING_FREQUENCY;
-		ret = usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
+	} else {
+		if (timer_pending(&yld->timer))	{
+			/* should not happen! */
+			del_timer(&yld->timer);
+			err("Timer was pending already!");
+		}
+		yld->next_expires = jiffies + delay;
+		mod_timer(&yld->timer, yld->next_expires);
 	}
 	return ret;
 }
@@ -649,7 +685,8 @@ static void timer_callback(unsigned long ylda)
  * returns <0 upon error
  *          0 no error
  */
-static int submit_next_request(struct yealink_dev *yld, int mem_flags)
+static int submit_next_request(struct yealink_dev *yld, int mem_flags,
+				int prior_delay)
 {
 	union yld_ctl_packet *ctl_data;
 	enum yld_ctl_protocols proto;
@@ -658,21 +695,29 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 	u8 *data;
 	u8 offset;
 	int i, ix, len;
-	int delayed = 0;
 
+	/*dbg("%s", __FUNCTION__);*/
 	if (!yld->model) {
 		err("%s - unknown model", __FUNCTION__);
 		return -ENODEV;
 	}
 
-	if (timer_pending(&yld->timer)) {
-		/* this should really only happen for G2! */
+	if (timer_pending(&yld->timer) && (prior_delay > 0)) {
+		err("%s - timer still pending", __FUNCTION__);
 		return 0;
 	}
 
 	proto = yld->model->protocol;
 	ctl_data = yld->ctl_scan.ctl_data;
 	ix = yld->stat_ix;
+
+	if (proto == yld_ctl_protocol_g2 &&
+	    down_trylock(&yld->update_sem) == 0) {
+		/* the semaphore could be aquired so it was not locked
+		 * before calling this function -> bad!
+		 */
+		err("%s - semaphore was not locked!", __FUNCTION__);
+	}
 
 	data = (proto == yld_ctl_protocol_g1) ?
 		ctl_data->g1.data : ctl_data->g2.data;
@@ -689,23 +734,16 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 		yld->copy.b[ix] = val;
 		
 		/* Setup an appropriate update request */
-		sum = 0;
-
 		switch(ix) {
 		case offsetof(struct yld_status, init):
 			ctl_data->cmd	= CMD_INIT;
-			if (proto == yld_ctl_protocol_g1) {
+			if (proto == yld_ctl_protocol_g1)
 				ctl_data->g1.size = 10;
-				sum -= 10;
-			}
 			break;
 		case offsetof(struct yld_status, version):
 			ctl_data->cmd	= CMD_VERSION;
-			if (proto == yld_ctl_protocol_g1) {
+			if (proto == yld_ctl_protocol_g1)
 				ctl_data->g1.size = 2;
-				sum -= 2;
-			}
-			delayed	= 1;
 			break;
 		case offsetof(struct yld_status, led):
 			ctl_data->cmd	= CMD_LED;
@@ -713,15 +751,46 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 				data[0] = (val) ? 0xff : 0x00;
 				data[1] = (val) ? 0x00 : 0xff;
 				ctl_data->g1.size = 2;
-				sum -= 1;
 			} else {
 				data[0] = (val) ? 0 : 1;	/* invert */
-				sum -= data[0];
-				if (proto == yld_ctl_protocol_g1) {
+				if (proto == yld_ctl_protocol_g1)
 					ctl_data->g1.size = 1;
-					sum--;
-				}
 			}
+			break;
+		case offsetof(struct yld_status, ringvol):
+			if (yld->model->name == p1k_model ||
+			    yld->model->name == p1kh_model) {
+				ctl_data->cmd	= CMD_RING_VOLUME;
+				if (proto == yld_ctl_protocol_g1)
+					ctl_data->g1.size = 1;
+				data[0] = val;
+			}
+			break;
+		case offsetof(struct yld_status, ringnote_mod):
+			if (yld->model->name != p1k_model &&
+			    yld->model->name != p1kh_model)
+				break;
+			if (!yld->ring_notes ||
+			    yld->notes_ix >= yld->notes_len)
+				break;
+			len = yld->notes_len - yld->notes_ix;
+			if (proto == yld_ctl_protocol_g1) {
+				if (len > sizeof(ctl_data->g1.data))
+					len = sizeof(ctl_data->g1.data);
+				ctl_data->g1.offset = cpu_to_be16(yld->notes_ix);
+				ctl_data->g1.size   = len;
+			} else {
+				if (len > sizeof(ctl_data->g2.data))
+					len = sizeof(ctl_data->g2.data);
+			}
+			for (i = 0; i < len; i++)
+				data[i] = yld->ring_notes[yld->notes_ix + i];
+			ctl_data->cmd	= CMD_RING_NOTE;
+			yld->notes_ix += len;
+			if (yld->notes_ix < yld->notes_len)
+				yld->copy.b[ix]--;	/* not done yet */
+			else
+				yld->notes_ix = 0;	/* reset for next time */
 			break;
 		case offsetof(struct yld_status, dialtone):
 			if (yld->model->name == b2k_model ||
@@ -729,7 +798,6 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 				ctl_data->cmd	= CMD_DIALTONE;
 				ctl_data->g1.size = 1;
 				data[0] = val;
-				sum -= val+1;
 			}
 			break;
 		case offsetof(struct yld_status, ringtone):
@@ -739,12 +807,9 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 				if (yld->model->name == p1k_model)
 					data[0] = (val) ? 0x24 : 0x00;
 				else
-					data[0] = (val) ? 0x01 : 0x00;
-				sum -= data[0];
-				if (proto == yld_ctl_protocol_g1) {
+					data[0] = (val) ? 0xff : 0x00;
+				if (proto == yld_ctl_protocol_g1)
 					ctl_data->g1.size = 1;
-					sum--;
-				}
 			}
 			break;
 		case offsetof(struct yld_status, backlight):
@@ -752,7 +817,6 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 				ctl_data->cmd	= CMD_LCD_BACKLIGHT;
 				ctl_data->g1.size = 1;
 				data[0] = val;
-				sum -= val+1;
 			}
 			break;
 		case offsetof(struct yld_status, speaker):
@@ -760,7 +824,6 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 				ctl_data->cmd	= CMD_SPEAKER;
 				ctl_data->g1.size = 1;
 				data[0] = val;
-				sum -= val+1;
 			}
 			break;
 		case offsetof(struct yld_status, pstn):
@@ -768,60 +831,66 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 				ctl_data->cmd	= CMD_PSTN_SWITCH;
 				ctl_data->g1.size = 1;
 				data[0] = val;
-				sum -= val+1;
 			}
 			break;
 		case offsetof(struct yld_status, keynum):
-			if (proto == yld_ctl_protocol_g2)
+			if (proto != yld_ctl_protocol_g1)
 				break;
 			val--;
 			val &= 0x1f;
-			sum -= val+1;
 			ctl_data->cmd		= CMD_SCANCODE;
 			ctl_data->g1.size	= 1;
 			ctl_data->g1.offset	= cpu_to_be16(val);
 			break;
 		default:
-			if (yld->model->name != b2k_model) {
-			    	offset = ix - offsetof(struct yld_status, lcd);
-				len = sizeof(yld->master.s.lcd) - offset;
-				
-				if (proto == yld_ctl_protocol_g1) {
-					if (len > sizeof(ctl_data->g1.data))
-						len = sizeof(ctl_data->g1.data);
-					ctl_data->g1.offset = cpu_to_be16(offset);
-					ctl_data->g1.size   = len;
-				} else {
-					if (len > sizeof(ctl_data->g2.data) - 2)
-						len = sizeof(ctl_data->g2.data) - 2;
-					data[0]	= len;		/* size */
-					data[1]	= offset;	/* offset */
-					data += 2;	/* urgh */
-				}
+			if (yld->model->name == b2k_model)
+				break;
 
-				/* Combine up to <len> consecutive LCD bytes
-				 * in a singe request */
-				ctl_data->cmd	= CMD_LCD;
-				sum		-= offset + len;
-				for(i=0; i<len; i++) {
-					val = yld->master.b[ix];
-					yld->copy.b[ix]	= val;
-					data[i]		= val;
-					sum		-= val;
-					ix++;
-				}
-				ix--;
+		    	offset = ix - offsetof(struct yld_status, lcd);
+			len = sizeof(yld->master.s.lcd) - offset;
+
+			if (proto == yld_ctl_protocol_g1) {
+				if (len > sizeof(ctl_data->g1.data))
+					len = sizeof(ctl_data->g1.data);
+				ctl_data->g1.offset = cpu_to_be16(offset);
+				ctl_data->g1.size   = len;
+			} else {
+				if (len > sizeof(ctl_data->g2.data) - 2)
+					len = sizeof(ctl_data->g2.data) - 2;
+				data[0]	= len;		/* size */
+				data[1]	= offset;	/* offset */
+				data += 2;	/* urgh */
 			}
+
+			/* Combine up to <len> consecutive LCD bytes
+			 * in a singe request */
+			ctl_data->cmd	= CMD_LCD;
+			for(i=0; i<len; i++) {
+				val = yld->master.b[ix];
+				yld->copy.b[ix]	= val;
+				data[i]		= val;
+				ix++;
+			}
+			ix--;
 			break;
 		}
 		ix++;
 		if (ctl_data->cmd != 0) {
+			u8 *p = (u8 *) ctl_data;
 			yld->stat_ix = ix;
-			if (proto == yld_ctl_protocol_g1)
-				ctl_data->g1.sum = sum - ctl_data->cmd;
-			else
-				ctl_data->g2.sum = sum - ctl_data->cmd;
-			return delayed_submit(yld, delayed, mem_flags);
+			len = (proto == yld_ctl_protocol_g1) ? USB_PKT_LEN_G1 :
+								USB_PKT_LEN_G2;
+			sum = 0;
+			for (i = 0; i < len - 1; i++)
+				sum -= p[i];
+			if (proto == yld_ctl_protocol_g1) {
+				ctl_data->g1.sum = sum;
+				return delayed_submit(yld, mem_flags, 0, 1);
+			} else {
+				ctl_data->g2.sum = sum;
+				return delayed_submit(yld, mem_flags,
+							prior_delay, 0);
+			}
 		}
 	}
 
@@ -838,7 +907,7 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags)
 			ctl_data->g1.sum  = 0xff - CMD_KEYPRESS;
 			yld->last_cmd = CMD_KEYPRESS;
 		}
-		return delayed_submit(yld, 1, mem_flags);
+		return delayed_submit(yld, mem_flags, YEALINK_POLLING_DELAY, 1);
 	} else {
 		up(&yld->update_sem);
 	}
@@ -866,6 +935,9 @@ static void urb_irq_callback(struct urb *urb)
 
 	if (urb->status)
 		err("%s - urb status %d", __FUNCTION__, urb->status);
+
+	if (proto == yld_ctl_protocol_g1 && timer_pending(&yld->timer))
+		del_timer(&yld->timer);
 
 	switch (yld->irq_data->cmd) {
 	case CMD_VERSION:
@@ -896,21 +968,27 @@ static void urb_irq_callback(struct urb *urb)
 
 	case CMD_HOOKPRESS:
 		ret = data0 & 0x10;
-		if (yld->hookstate != ret) {
-		    dbg("hookstate: %x", ret);
-		    input_report_key(yld->idev, KEY_PHONE, ret >> 4);
-		    input_sync(yld->idev);
-		    yld->hookstate = ret;
+		if (yld->hookstate == ret)
+			break;
+		dbg("hookstate: %x", ret);
+		if (yld->input_refcnt > 0) {
+			input_report_key(yld->idev, KEY_PHONE, ret >> 4);
+			input_sync(yld->idev);
 		}
+		yld->hookstate = ret;
 		break;
 
 	case CMD_SCANCODE:
 		dbg("get scancode %x", data0);
-
 		ret = yld->model->keycode(data0);
-		report_key(yld, ret);
+		if (yld->input_refcnt > 0)
+			report_key(yld, ret);
 		if (ret < 0 && data0 != 0xff)
 			info("unknown scancode 0x%02x", data0);
+		break;
+
+	case CMD_INIT:
+		/* this may return some serial number but it can be neglected */
 		break;
 
 	case STATE_BAD_PKT:
@@ -924,7 +1002,7 @@ static void urb_irq_callback(struct urb *urb)
 	}
 	
 	if (proto == yld_ctl_protocol_g1) {
-		ret = submit_next_request(yld, GFP_ATOMIC);
+		ret = submit_next_request(yld, GFP_ATOMIC, 0);
 		if (ret)
 			err("%s - submit_next_request failed %d", __FUNCTION__, ret);
 	} else {
@@ -960,17 +1038,39 @@ static void urb_ctl_callback(struct urb *urb)
 	case CMD_KEYPRESS:
 	case CMD_SCANCODE:
 	case CMD_VERSION:
+	case CMD_INIT:
 		if (proto == yld_ctl_protocol_g1) {
-			/* explicitly ask for a response */
+			/* Expect a response on the irq endpoint!
+			 * However to catch the case were there is no response
+			 * also set up a timer with a rather long delay to
+			 * repeat the last command.
+			 * TODO: Timeout will result in a resubmit of the
+			 *       irq urb, which fails with -EINVAL (-22)!
+			 */
+			if (timer_pending(&yld->timer))	{
+				/* should not happen! */
+				err("Timer was pending already!");
+			}
+			mod_timer(&yld->timer, jiffies + YEALINK_POLLING_DELAY * 10);
 			ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
 		} else {
-			/* send new command */
-			ret = submit_next_request(yld, GFP_ATOMIC);
+			/* queue up the next request after a longer delay */
+			/* TODO: How can we detect that the irq was generated
+			 *       as expected? */
+			ret = submit_next_request(yld, GFP_ATOMIC,
+					YEALINK_COMMAND_DELAY_G2 * 4);
 		}
 		break;
 	default:
-		/* send new command */
-		ret = submit_next_request(yld, GFP_ATOMIC);
+		if (proto == yld_ctl_protocol_g1) {
+			/* immediately send new command */
+			ret = submit_next_request(yld, GFP_ATOMIC, 0);
+		} else {
+			/* queue up the next request after some small delay */
+			ret = submit_next_request(yld, GFP_ATOMIC,
+					YEALINK_COMMAND_DELAY_G2);
+		}
+		break;
 	}
 
 	if (ret)
@@ -1009,37 +1109,9 @@ static int input_open(struct input_dev *dev)
 #else
 				input_get_drvdata(dev);
 #endif
-	enum yld_ctl_protocols proto;
-	int i, ret;
-
-	dbg("%s", __FUNCTION__);
-	
-	if (!yld->model) {	/* return silently */
-		warn("%s - no model selected!", __FUNCTION__);
-		return 0;
-	}
-
-	proto = yld->model->protocol;
-
-	/* force updates to device */
-	for (i = 0; i<sizeof(yld->master); i++)
-		yld->copy.b[i] = ~yld->master.b[i];
-	yld->key_code = -1;	/* no keys pressed */
-
-	if (proto == yld_ctl_protocol_g1) {
-	        yealink_set_ringtone(yld, default_ringtone_g1,
-	                             sizeof(default_ringtone_g1));
-	} else {
-	        yealink_set_ringtone(yld, default_ringtone_g2,
-	                             sizeof(default_ringtone_g2));
-		/* immediately start waiting for a key */
-		ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
-		if (ret)
-			err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
-	}
-
-	return submit_next_request(yld, GFP_KERNEL);
-	//return 0;
+	yld->input_refcnt++;
+	dbg("%s - input device opened %d times", __FUNCTION__, yld->input_refcnt);
+	return 0;
 }
 
 static void input_close(struct input_dev *dev)
@@ -1051,12 +1123,11 @@ static void input_close(struct input_dev *dev)
 				input_get_drvdata(dev);
 #endif
 
-	if (timer_pending(&yld->timer))
-		del_timer(&yld->timer);
-
-	usb_kill_urb(yld->ctl_cmd.urb_ctl);
-	usb_kill_urb(yld->ctl_scan.urb_ctl);
-	usb_kill_urb(yld->urb_irq);
+	if (yld->input_refcnt > 0)
+		yld->input_refcnt--;
+	else
+		err("%s - failed decrementing input_refcnt", __FUNCTION__);
+	dbg("%s - input device opened %d times", __FUNCTION__, yld->input_refcnt);
 }
 
 /*******************************************************************************
@@ -1165,7 +1236,7 @@ static ssize_t store_line(struct device *dev, const char *buf, size_t count,
 	if (submit && yld->model && yld->model->protocol == yld_ctl_protocol_g2) {
 		if (down_interruptible(&yld->update_sem)) //??
 			return -ERESTARTSYS;
-		submit_next_request(yld, GFP_KERNEL);
+		submit_next_request(yld, GFP_KERNEL, 0);
 	}
 	return count;
 }
@@ -1222,13 +1293,28 @@ static ssize_t set_icon(struct device *dev, const char *buf, size_t count,
 			int chr)
 {
 	struct yealink_dev *yld;
+	enum yld_ctl_protocols proto;
+	int early_wait = 0;
 	int i;
 
 	down_write(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
-	if (yld == NULL) {
+	if (yld == NULL || yld->model == NULL) {
 		up_write(&sysfs_rwsema);
 		return -ENODEV;
+	}
+	proto = yld->model->protocol;
+	if (proto == yld_ctl_protocol_g2) {
+		early_wait = (chr != ' ') &&
+		             (strncmp(buf, "RINGTONE", count) == 0);
+		if (early_wait) {
+			/* must update the ringnotes before activating the buzzer */
+			if (down_interruptible(&yld->update_sem)) {
+				up_write(&sysfs_rwsema);
+				return -ERESTARTSYS;
+			}
+			yld->master.s.ringnote_mod++;
+		}
 	}
 
 	for (i = 0; i < ARRAY_SIZE(lcdMap); i++) {
@@ -1241,10 +1327,10 @@ static ssize_t set_icon(struct device *dev, const char *buf, size_t count,
 	}
 	up_write(&sysfs_rwsema);
 
-	if (yld->model && yld->model->protocol == yld_ctl_protocol_g2) {
-		if (down_interruptible(&yld->update_sem)) //??
+	if (proto == yld_ctl_protocol_g2) {
+		if (!early_wait && down_interruptible(&yld->update_sem))
 			return -ERESTARTSYS;
-		submit_next_request(yld, GFP_KERNEL);
+		submit_next_request(yld, GFP_KERNEL, 0);
 	}
 
 	return count;
@@ -1274,15 +1360,16 @@ static ssize_t store_ringtone(struct device *dev,
 
 	down_write(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
-	if (yld == NULL) {
+	if (yld == NULL || yld->model == NULL) {
 		up_write(&sysfs_rwsema);
 		return -ENODEV;
 	}
 
-	if (down_interruptible(&yld->update_sem)) //??
-		return -ERESTARTSYS;
-	yealink_set_ringtone(yld, (char *)buf, count);
-	up(&yld->update_sem);
+	set_ringnotes(yld, (char *)buf, count);
+	if (yld->model->protocol == yld_ctl_protocol_g1 && count > 1) {
+		/* force immediate download update of ringnotes */
+		yld->master.s.ringnote_mod++;
+	}
 
 	up_write(&sysfs_rwsema);
 	return count;
@@ -1342,7 +1429,54 @@ static struct attribute_group yld_attr_group = {
 };
 
 /*******************************************************************************
- * Linux interface and usb initialisation
+ * Initialization of the device
+ ******************************************************************************/
+
+static int yealink_init_device(struct yealink_dev *yld) {
+	enum yld_ctl_protocols proto;
+	int i, ret;
+
+	if (!yld->model) {	/* return silently */
+		warn("%s - no model selected!", __FUNCTION__);
+		return 0;
+	}
+	/*dbg("%s", __FUNCTION__);*/
+
+	proto = yld->model->protocol;
+	
+	/* clear visible elements */
+	for (i = 0; i < ARRAY_SIZE(lcdMap); i++)
+		setChar(yld, i, ' ');
+
+	/* display driver version on LCD line 3 */
+	store_line(&yld->interface->dev, DRIVER_VERSION, sizeof(DRIVER_VERSION),
+		LCD_LINE3_OFFSET, LCD_LINE3_SIZE, 0);
+
+	if (proto == yld_ctl_protocol_g1)
+	        set_ringnotes(yld, default_ringtone_g1,
+	                      sizeof(default_ringtone_g1));
+	else
+	        set_ringnotes(yld, default_ringtone_g2,
+	                      sizeof(default_ringtone_g2));
+
+	/* force updates to device */
+	for (i = 0; i<sizeof(yld->master); i++)
+		yld->copy.b[i] = ~yld->master.b[i];
+	yld->key_code = -1;	/* no keys pressed */
+
+	if (proto == yld_ctl_protocol_g2) {
+		/* immediately start waiting for a key */
+		ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
+		if (ret)
+			err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
+		if (down_interruptible(&yld->update_sem))
+			return -ERESTARTSYS;
+	}
+	return submit_next_request(yld, GFP_KERNEL, 0);
+}
+
+/*******************************************************************************
+ * Linux interface and usb initialization
  ******************************************************************************/
 
 static const struct usb_device_id usb_table [] = {
@@ -1379,8 +1513,12 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 	if (yld == NULL)
 		return err;
 
+	
+	if (timer_pending(&yld->timer))
+		del_timer(&yld->timer);
+
 	usb_kill_urb(yld->urb_irq);	/* parameter validation in core/urb */
-	usb_kill_urb(yld->ctl_cmd.urb_ctl); /* parameter validation in core/urb */
+	//usb_kill_urb(yld->ctl_cmd.urb_ctl); /* parameter validation in core/urb */
 	usb_kill_urb(yld->ctl_scan.urb_ctl); /* parameter validation in core/urb */
 
         if (yld->idev) {
@@ -1391,15 +1529,15 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 	}
 
 	usb_free_urb(yld->urb_irq);
-	usb_free_urb(yld->ctl_cmd.urb_ctl);
+	//usb_free_urb(yld->ctl_cmd.urb_ctl);
 	usb_free_urb(yld->ctl_scan.urb_ctl);
 
-	if (yld->ctl_cmd.ctl_req)
+	/*if (yld->ctl_cmd.ctl_req)
 		usb_buffer_free(yld->udev, sizeof(*(yld->ctl_cmd.ctl_req)),
 		                yld->ctl_cmd.ctl_req, yld->ctl_cmd.ctl_req_dma);
 	if (yld->ctl_cmd.ctl_data)
 		usb_buffer_free(yld->udev, yld->pkt_len,
-		                yld->ctl_cmd.ctl_data, yld->ctl_cmd.ctl_dma);
+		                yld->ctl_cmd.ctl_data, yld->ctl_cmd.ctl_dma);*/
 	if (yld->ctl_scan.ctl_req)
 		usb_buffer_free(yld->udev, sizeof(*(yld->ctl_scan.ctl_req)),
 		                yld->ctl_scan.ctl_req, yld->ctl_scan.ctl_req_dma);
@@ -1534,9 +1672,9 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	yld->urb_irq->dev = udev;
 
 	/* allocate usb buffers for control endpoint */
-	ret = usb_allocate_init_ctl_req(yld, &(yld->ctl_cmd));
+	/*ret = usb_allocate_init_ctl_req(yld, &(yld->ctl_cmd));
 	if (ret != 0)
-		return ret;
+		return ret;*/
 
 	/*if (proto == yld_ctl_protocol_g1) {*/
 		ret = usb_allocate_init_ctl_req(yld, &(yld->ctl_scan));
@@ -1556,6 +1694,8 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	/* register settings for the input device */
 //	input_dev->name = nfo->name; TODO better driver messages / registration
 //	input_dev->name = yld_device[i].name;
+	input_dev->name = "yealink";
+	input_dev->uniq = "yealink";
 	input_dev->phys = yld->phys;
 	usb_to_input_id(udev, &input_dev->id);
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,24)
@@ -1593,13 +1733,10 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	usb_set_intfdata(intf, yld);
 
-	/* clear visible elements */
-	for (i = 0; i < ARRAY_SIZE(lcdMap); i++)
-		setChar(yld, i, ' ');
-
-	/* display driver version on LCD line 3 */
-	store_line(&intf->dev, DRIVER_VERSION, sizeof(DRIVER_VERSION),
-		LCD_LINE3_OFFSET, LCD_LINE3_SIZE, 0);
+	/* initialize the device and start the key/hook scanner */
+	ret = yealink_init_device(yld);
+	if (ret)
+		return usb_cleanup(yld, ret);
 
 	/* Register sysfs hooks (don't care about failure) */
 	ret = sysfs_create_group(&intf->dev.kobj, &yld_attr_group);

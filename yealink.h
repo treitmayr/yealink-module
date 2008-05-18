@@ -158,7 +158,7 @@ enum yld_ctl_protocols {
 
 /* Set ringtone volume
  *
- * models       P1K, P1KH, ...(?)
+ * models       P1K, P1KH
  * cmd		0x11
  * size		1
  * offset	0
@@ -168,7 +168,7 @@ enum yld_ctl_protocols {
 
 /* Turn on the speaker for ringing and hands-free operation
  *
- * models       P3K, P4K, V1K, ...(?)
+ * models       P3K, P4K, V1K
  * cmd		0x0c
  * size		1
  * offset	0
@@ -180,27 +180,35 @@ enum yld_ctl_protocols {
 
 /* Set ringtone notes
  *
+ * models	P1K, P1KH
  * cmd		0x02
  * size		1-11
  * offset	0->
- * data		binary representation LE16(-freq), LE16(duration) ....
+ * data		P1K:  binary representation LE16(-freq), LE16(duration) ....
+ *		P1KH: only 1 byte for each -freq, duration
+ * Note: Current investigations with the P1KH suggest that the P1KH requires
+ *       the ring notes to be downloaded each time before turning on the
+ *       ringtone.
  */
 #define CMD_RING_NOTE		0x02
 
 /* Sound ringtone via the speaker on the back
  *
- * models       P1K, P1KH, ...(?)
+ * models	P1K, P1KH
  * cmd		0x03
  * size		1
  * offset	0
  * data[0]	0 OFF / 0x24 ON (P1K)
- *              0 OFF / 0x01 ON (P1KH)
+ *              0 OFF / 0xff ON (P1KH)
+ * Note: At least for the P1KH this seems to be a loop counter which is
+ *       decremented with each sequence of ring notes. Therefore ringing will
+ *       stop after the ring notes were played data[0] times.
  */
 #define CMD_RINGTONE		0x03
 
 /* Sound dial tone via the ear speaker
  *
- * models       B2K, B3K, P3K, P4K, V1K, ...(?)
+ * models       B2K, B3K, P3K, P4K, V1K
  * cmd		0x09
  * size		1
  * offset	0
