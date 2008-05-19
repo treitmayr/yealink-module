@@ -18,6 +18,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+
 /*
  * Description:
  *   Driver for the USB-P1K voip usb phone.
@@ -90,7 +91,7 @@
 #define USB_YEALINK_PRODUCT_ID2	0xb700
 
 #define YEALINK_POLLING_DELAY		100	/* in [ms] */
-#define YEALINK_COMMAND_DELAY_G2	16	/* in [ms] */
+#define YEALINK_COMMAND_DELAY_G2	25	/* in [ms] */
 
 struct yld_status {
 	u8	version;
@@ -907,7 +908,10 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags,
 			ctl_data->g1.sum  = 0xff - CMD_KEYPRESS;
 			yld->last_cmd = CMD_KEYPRESS;
 		}
-		return delayed_submit(yld, mem_flags, YEALINK_POLLING_DELAY, 1);
+		prior_delay = (yld->model->name == p4k_model) ?
+				YEALINK_POLLING_DELAY / 2 :
+				YEALINK_POLLING_DELAY;
+		return delayed_submit(yld, mem_flags, prior_delay, 1);
 	} else {
 		up(&yld->update_sem);
 	}
