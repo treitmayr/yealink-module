@@ -3,22 +3,26 @@ Driver documentation for yealink phones and ATA adapter.
 0. Status
 ~~~~~~~~~
 Phone models:
-USB-P1K	USB 1.1 hand phone with LCD, keypad and ringer.
-USB-P4K	USB 1.1 speaker phone desktop model.
-USB-B2K	USB 1.1 telbox, ATA adapter for PSTN.
+USB-P1K  USB 1.1 hand phone with LCD, keypad and ringer.
+USB-P1KH USB 1.1 hand phone with LCD, keypad and ringer.
+USB-P4K  USB 1.1 speaker phone desktop model.
+USB-B2K  USB 1.1 telbox, ATA adapter for PSTN.
 
 For manufacturer documentation see http://www.yealink.com
 
-The development branch is maintained at:
+The original development branch can be found at:
 http://cvs.savannah.gnu.org/viewcvs/usbb2k-api/yealink-module/
+
+The updated sources supporting the P1KH can be found at:
+http://www.devbase.at/svn/view.cgi/yealink-module/?root=voip
 
 
 Matrix of supported features:
-function	API	P1K	P4K	B2K
+function	API	P1K(H)	P4K	B2K
 -------------------------------------------
 audio playback	alsa 	ok	ok	ok
 audio record	alsa	ok	ok	ok
-keyboard	input	ok	ok	WIP
+keyboard	input	ok	ok	ok
 hookflash	input		ok	WIP
 LCD		sysfs	ok	ok
 LED		sysfs	ok
@@ -27,7 +31,7 @@ RINGTONE	sysfs	ok		WIP
 BACKLIGHT	sysfs		ok
 SPEAKER		sysfs		ok
 PSTN		sysfs			ok
-LED_USB		sysfs			WIP
+LED_USB		sysfs			ok
 
 Notes:
 P4K: Ring tones are implemented by switching on the SPEAKER
@@ -48,7 +52,7 @@ Please check out: http://www.devbase.at/voip/yeaphone.php
 
 1. Compilation (stand alone version)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Currently only kernel 2.6.x.y versions are supported.
+Currently only kernel versions >= 2.6.18 are supported.
 In order to build the yealink.ko module do
 
   make
@@ -76,7 +80,7 @@ A: The sysfs files are located on the particular usb endpoint. On most
    distributions you can do: "find /sys/ -name get_icons" for a hint.
 
 
-2. keyboard features
+2. Keyboard features
 ~~~~~~~~~~~~~~~~~~~~
 Keyboard events are processes trough the input layer. A user space application
 may issue the EVIOCGRAB ioctl() on the corresponding /dev/input/eventX device
@@ -175,20 +179,10 @@ For userland the following interfaces are available using the sysfs interface:
 
 	   model	Read, returns available phone models with the currently
 	   		selected one.
-			Write, switches of phone model in order to get the
-			correct key mapping for example.
 
   module parameters:
 
-	default_model	Initializes the current model type, see /sys/../model.
-			For example:
-
-			insmod yealink.ko default_model=P1K
-			insmod yealink.ko default_model=P4K
-
-			This is a make shift solution until we know how to query
-			the phone properly for this.
-
+	   none
 
 4.1 lineX
 ~~~~~~~~~
@@ -260,15 +254,12 @@ updated with the first letter of the icon.
 
 4.4 model
 ~~~~~~~~~
+The phone model is auto-selected and can be queried by:
 Select and query phone model.
 
   Example - show available types (with P1K selected):
-  cat /sys/.../model
-  * P1K
-    P4K
-
-  Example - switch to P4K model:
-  echo -n "P4K" > /sys/.../model
+  cat ./model
+  P1K
 
 
 5. Sound features
