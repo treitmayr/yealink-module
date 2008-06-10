@@ -1,0 +1,11 @@
+*~
+.libs
+.deps
+.tmp_versions
+*.mod.c
+*.o
+*.ko
+*.cmd
+*.tar.bz2
+modules.order
+Module.symvers
