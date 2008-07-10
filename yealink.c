@@ -345,6 +345,7 @@ static int set_ringnotes(struct yealink_dev *yld, u8 *buf, size_t size)
 		return -ENOMEM;
 
 	i = 0;
+	eos = 0;
 	while (i < (size - 1)) {
 		yld->ring_notes[i] = buf[i];
 		yld->ring_notes[i+1] = buf[i+1];
