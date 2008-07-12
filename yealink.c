@@ -64,6 +64,8 @@
  *   - P1K: Get rid of warning due to double-submission of irq urb.
  *   - Protect operations on the timer (may cause kernel panic!?).
  *   - P1KH: Better understand how the ring notes have to be set up.
+ *   - Analyze effects of jiffies roll-over, especially in delayed_submit()
+ *   - **Finish shutdown + spin_shutdown**
  */
 
 #include <linux/kernel.h>
@@ -90,8 +92,15 @@
 #define USB_YEALINK_PRODUCT_ID1	0xb001
 #define USB_YEALINK_PRODUCT_ID2	0xb700
 
+/* The following is the delay for polling the key matrix (G1 phones only) */
 #define YEALINK_POLLING_DELAY		100	/* in [ms] */
+
+/* The following is the delay between individual commands for
+   LCD, Buzzer, ... (G2 phones only) to provide enough time for the
+   handset to process the command. Otherwise effects like a partially
+   updated LCD were observed. */
 #define YEALINK_COMMAND_DELAY_G2	25	/* in [ms] */
+
 
 struct yld_status {
 	u8	version;
@@ -157,6 +166,8 @@ struct yealink_dev {
 	struct input_dev	*idev;		/* input device */
 	int			input_refcnt;
 
+	spinlock_t		spin_shutdown;	/* for accessing shutdown */
+
 	struct timer_list	timer;		/* timer for key/hook scans */
 	unsigned long		next_expires;
 	struct semaphore	update_sem;	/* G2 transfer protection */
@@ -169,13 +180,12 @@ struct yealink_dev {
 	struct urb		*urb_irq;
 	int			pkt_len;
 
-	/* control output channel for repetitive key/hook scans */
+	/* control output channel for repetitive key/hook scans;
+	   TODO: possibly revert to individual fields, like with irq channel */
 	struct yld_ctl_chan	ctl_scan;
 
-	/* control output channel for all other commands */
-	//struct yld_ctl_chan	ctl_cmd;
-
-	char phys[64];			/* physical device path */
+	char	phys[64];		/* physical device path */
+	int	shutdown:1;		/* set while URBs get killed */
 
 	u8 lcdMap[ARRAY_SIZE(lcdMap)];	/* state of LCD, LED ... */
 	int	key_code;		/* last reported key	 */
@@ -634,25 +644,33 @@ static void report_key(struct yealink_dev *yld, int key)
  */
 static int delayed_submit(struct yealink_dev *yld, int mem_flags,
 				int delay, int relative) {
-	int ret;
+	int ret = 0;
 
-	if (delay == 0)
-		return usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
+	if (delay == 0) {
+		spin_lock(&yld->spin_shutdown);
+		if (!yld->shutdown)
+			ret = usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
+		spin_unlock(&yld->spin_shutdown);
+		return ret;
+	}
 
 	delay = (HZ * delay + 999) / 1000;	/* calculate ticks */
-	ret = 0;
 	if (relative) {
 		if (yld->next_expires > jiffies) {
 			mod_timer(&yld->timer, yld->next_expires);
 			yld->next_expires += delay;
 		} else {
-			if (timer_pending(&yld->timer))	{
-				/* should not happen! */
-				del_timer(&yld->timer);
-				err("Timer was pending already!");
+			spin_lock(&yld->spin_shutdown);
+			if (!yld->shutdown) {
+				if (timer_pending(&yld->timer))	{
+					/* should not happen! */
+					del_timer(&yld->timer);
+					err("Timer was pending already!");
+				}
+				ret = usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
 			}
+			spin_unlock(&yld->spin_shutdown);
 			yld->next_expires = jiffies + delay;
-			ret = usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
 		}
 	} else {
 		if (timer_pending(&yld->timer))	{
@@ -673,11 +691,14 @@ static int delayed_submit(struct yealink_dev *yld, int mem_flags,
 static void timer_callback(unsigned long ylda)
 {
 	struct yealink_dev *yld;
-	int ret;
+	int ret = 0;
 	
 	yld = (struct yealink_dev *)ylda;
 	
-	ret = usb_submit_urb(yld->ctl_scan.urb_ctl, GFP_ATOMIC);
+	spin_lock(&yld->spin_shutdown);
+	if (!yld->shutdown)
+		ret = usb_submit_urb(yld->ctl_scan.urb_ctl, GFP_ATOMIC);
+	spin_unlock(&yld->spin_shutdown);
 	
 	if (ret)
 		err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
@@ -815,27 +836,31 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags,
 			}
 			break;
 		case offsetof(struct yld_status, backlight):
-			if (yld->model->name == p4k_model) {
-				ctl_data->cmd	= CMD_LCD_BACKLIGHT;
-				ctl_data->g1.size = 1;
-				data[0] = val;
-			}
+			/* backlight supported by P4K only */
+			if (yld->model->name != p4k_model)
+				break;
+			ctl_data->cmd	= CMD_LCD_BACKLIGHT;
+			ctl_data->g1.size = 1;
+			data[0] = val;
 			break;
 		case offsetof(struct yld_status, speaker):
-			if (yld->model->name == p4k_model) {
-				ctl_data->cmd	= CMD_SPEAKER;
-				ctl_data->g1.size = 1;
-				data[0] = val;
-			}
+			/* speakerphone supported by P4K only */
+			if (yld->model->name != p4k_model)
+				break;
+			ctl_data->cmd	= CMD_SPEAKER;
+			ctl_data->g1.size = 1;
+			data[0] = val;
 			break;
 		case offsetof(struct yld_status, pstn):
-			if (yld->model->name == b2k_model) {
-				ctl_data->cmd	= CMD_PSTN_SWITCH;
-				ctl_data->g1.size = 1;
-				data[0] = val;
-			}
+			/* USB/PSTN switch supported by B2K only */
+			if (yld->model->name != b2k_model)
+				break;
+			ctl_data->cmd	= CMD_PSTN_SWITCH;
+			ctl_data->g1.size = 1;
+			data[0] = val;
 			break;
 		case offsetof(struct yld_status, keynum):
+			/* explicit query for key code only required for G1 phones */
 			if (proto != yld_ctl_protocol_g1)
 				break;
 			val--;
@@ -845,6 +870,7 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags,
 			ctl_data->g1.offset	= cpu_to_be16(val);
 			break;
 		default:
+			/* no LCD available for B2K */
 			if (yld->model->name == b2k_model)
 				break;
 
@@ -861,7 +887,7 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags,
 					len = sizeof(ctl_data->g2.data) - 2;
 				data[0]	= len;		/* size */
 				data[1]	= offset;	/* offset */
-				data += 2;	/* urgh */
+				data += 2;		/* data starts here */
 			}
 
 			/* Combine up to <len> consecutive LCD bytes
@@ -880,11 +906,13 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags,
 		if (ctl_data->cmd != 0) {
 			u8 *p = (u8 *) ctl_data;
 			yld->stat_ix = ix;
+			/* calculate the checksum */
 			len = (proto == yld_ctl_protocol_g1) ? USB_PKT_LEN_G1 :
 								USB_PKT_LEN_G2;
 			sum = 0;
 			for (i = 0; i < len - 1; i++)
 				sum -= p[i];
+			/* submit the assembled command */
 			if (proto == yld_ctl_protocol_g1) {
 				ctl_data->g1.sum = sum;
 				return delayed_submit(yld, mem_flags, 0, 1);
@@ -898,6 +926,8 @@ static int submit_next_request(struct yealink_dev *yld, int mem_flags,
 
 	yld->stat_ix = 0;
 	if (proto == yld_ctl_protocol_g1) {
+		/* after each completed update cycle
+		   perform a key scan or a hook scan (P4K only) */
 		ctl_data->g1.size = 1;
 		if (yld->model->name == p4k_model && 
 		    yld->last_cmd == CMD_KEYPRESS) {
@@ -1012,7 +1042,11 @@ static void urb_irq_callback(struct urb *urb)
 			err("%s - submit_next_request failed %d", __FUNCTION__, ret);
 	} else {
 		/* always wait for a key or some other interrupt */
-		ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
+		ret = 0;
+		spin_lock(&yld->spin_shutdown);
+		if (!yld->shutdown)
+			ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
+		spin_unlock(&yld->spin_shutdown);
 		if (ret)
 			err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
 	}
@@ -1026,7 +1060,7 @@ static void urb_ctl_callback(struct urb *urb)
 {
 	struct yealink_dev *yld = urb->context;
 	enum yld_ctl_protocols proto;
-	int ret;
+	int ret = 0;
 
 	if (urb->status)
 		err("%s - urb status %d", __FUNCTION__, urb->status);
@@ -1056,8 +1090,12 @@ static void urb_ctl_callback(struct urb *urb)
 				/* should not happen! */
 				err("Timer was pending already!");
 			}
-			mod_timer(&yld->timer, jiffies + YEALINK_POLLING_DELAY * 10);
-			ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
+			spin_lock(&yld->spin_shutdown);
+			if (!yld->shutdown) {
+				mod_timer(&yld->timer, jiffies + YEALINK_POLLING_DELAY * 10);
+				ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
+			}
+			spin_unlock(&yld->spin_shutdown);
 		} else {
 			/* queue up the next request after a longer delay */
 			/* TODO: How can we detect that the irq was generated
@@ -1470,8 +1508,12 @@ static int yealink_init_device(struct yealink_dev *yld) {
 	yld->key_code = -1;	/* no keys pressed */
 
 	if (proto == yld_ctl_protocol_g2) {
+		ret = 0;
 		/* immediately start waiting for a key */
-		ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
+		spin_lock(&yld->spin_shutdown);
+		if (!yld->shutdown)
+			ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
+		spin_unlock(&yld->spin_shutdown);
 		if (ret)
 			err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
 		if (down_interruptible(&yld->update_sem))
@@ -1518,13 +1560,20 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 	if (yld == NULL)
 		return err;
 
-	
+	spin_lock_irq(&yld->spin_shutdown);
+	yld->shutdown = 1;
+	spin_unlock_irq(&yld->spin_shutdown);
+
+	/* TODO: Do the following 2 lines require the spin-lock? */
 	if (timer_pending(&yld->timer))
 		del_timer(&yld->timer);
 
 	usb_kill_urb(yld->urb_irq);	/* parameter validation in core/urb */
-	//usb_kill_urb(yld->ctl_cmd.urb_ctl); /* parameter validation in core/urb */
 	usb_kill_urb(yld->ctl_scan.urb_ctl); /* parameter validation in core/urb */
+
+	spin_lock_irq(&yld->spin_shutdown);
+	yld->shutdown = 0;
+	spin_unlock_irq(&yld->spin_shutdown);
 
         if (yld->idev) {
 		if (err)
@@ -1534,15 +1583,8 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 	}
 
 	usb_free_urb(yld->urb_irq);
-	//usb_free_urb(yld->ctl_cmd.urb_ctl);
 	usb_free_urb(yld->ctl_scan.urb_ctl);
 
-	/*if (yld->ctl_cmd.ctl_req)
-		usb_buffer_free(yld->udev, sizeof(*(yld->ctl_cmd.ctl_req)),
-		                yld->ctl_cmd.ctl_req, yld->ctl_cmd.ctl_req_dma);
-	if (yld->ctl_cmd.ctl_data)
-		usb_buffer_free(yld->udev, yld->pkt_len,
-		                yld->ctl_cmd.ctl_data, yld->ctl_cmd.ctl_dma);*/
 	if (yld->ctl_scan.ctl_req)
 		usb_buffer_free(yld->udev, sizeof(*(yld->ctl_scan.ctl_req)),
 		                yld->ctl_scan.ctl_req, yld->ctl_scan.ctl_req_dma);
@@ -1632,6 +1674,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	yld->udev = udev;
 	yld->interface = intf;
 	sema_init(&yld->update_sem, 1);
+	spin_lock_init(&yld->spin_shutdown);
 
 	/* get a handle to the interrupt data pipe */
 	pipe = usb_rcvintpipe(udev, endpoint->bEndpointAddress);
@@ -1667,7 +1710,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (yld->irq_data == NULL)
 		return usb_cleanup(yld, -ENOMEM);
 
-	/* initialise irq urb */
+	/* initialize irq urb */
 	usb_fill_int_urb(yld->urb_irq, udev, pipe, yld->irq_data,
 			pkt_len,
 			urb_irq_callback,
@@ -1676,21 +1719,12 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	yld->urb_irq->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 	yld->urb_irq->dev = udev;
 
-	/* allocate usb buffers for control endpoint */
-	/*ret = usb_allocate_init_ctl_req(yld, &(yld->ctl_cmd));
+	ret = usb_allocate_init_ctl_req(yld, &(yld->ctl_scan));
 	if (ret != 0)
-		return ret;*/
+		return ret;
 
-	/*if (proto == yld_ctl_protocol_g1) {*/
-		ret = usb_allocate_init_ctl_req(yld, &(yld->ctl_scan));
-		if (ret != 0)
-			return ret;
-	/*}*/
-
-	/* set up the periodic scan timer */
-	/*if (proto == yld_ctl_protocol_g1) {*/
-		setup_timer(&yld->timer, timer_callback, (unsigned long)yld);
-	/*}*/
+	/* set up the periodic scan/update timer */
+	setup_timer(&yld->timer, timer_callback, (unsigned long)yld);
 
 	/* find out the physical bus location */
 	usb_make_path(udev, yld->phys, sizeof(yld->phys));
