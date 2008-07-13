@@ -65,7 +65,6 @@
  *   - Protect operations on the timer (may cause kernel panic!?).
  *   - P1KH: Better understand how the ring notes have to be set up.
  *   - Analyze effects of jiffies roll-over, especially in delayed_submit()
- *   - **Finish shutdown + spin_shutdown**
  */
 
 #include <linux/kernel.h>
@@ -165,8 +164,6 @@ struct yealink_dev {
 
 	struct input_dev	*idev;		/* input device */
 	int			input_refcnt;
-
-	spinlock_t		spin_shutdown;	/* for accessing shutdown */
 
 	struct timer_list	timer;		/* timer for key/hook scans */
 	unsigned long		next_expires;
@@ -647,10 +644,8 @@ static int delayed_submit(struct yealink_dev *yld, int mem_flags,
 	int ret = 0;
 
 	if (delay == 0) {
-		spin_lock(&yld->spin_shutdown);
 		if (!yld->shutdown)
 			ret = usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
-		spin_unlock(&yld->spin_shutdown);
 		return ret;
 	}
 
@@ -660,7 +655,6 @@ static int delayed_submit(struct yealink_dev *yld, int mem_flags,
 			mod_timer(&yld->timer, yld->next_expires);
 			yld->next_expires += delay;
 		} else {
-			spin_lock(&yld->spin_shutdown);
 			if (!yld->shutdown) {
 				if (timer_pending(&yld->timer))	{
 					/* should not happen! */
@@ -669,7 +663,6 @@ static int delayed_submit(struct yealink_dev *yld, int mem_flags,
 				}
 				ret = usb_submit_urb(yld->ctl_scan.urb_ctl, mem_flags);
 			}
-			spin_unlock(&yld->spin_shutdown);
 			yld->next_expires = jiffies + delay;
 		}
 	} else {
@@ -695,10 +688,8 @@ static void timer_callback(unsigned long ylda)
 	
 	yld = (struct yealink_dev *)ylda;
 	
-	spin_lock(&yld->spin_shutdown);
 	if (!yld->shutdown)
 		ret = usb_submit_urb(yld->ctl_scan.urb_ctl, GFP_ATOMIC);
-	spin_unlock(&yld->spin_shutdown);
 	
 	if (ret)
 		err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
@@ -1043,10 +1034,8 @@ static void urb_irq_callback(struct urb *urb)
 	} else {
 		/* always wait for a key or some other interrupt */
 		ret = 0;
-		spin_lock(&yld->spin_shutdown);
 		if (!yld->shutdown)
 			ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
-		spin_unlock(&yld->spin_shutdown);
 		if (ret)
 			err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
 	}
@@ -1090,12 +1079,10 @@ static void urb_ctl_callback(struct urb *urb)
 				/* should not happen! */
 				err("Timer was pending already!");
 			}
-			spin_lock(&yld->spin_shutdown);
 			if (!yld->shutdown) {
 				mod_timer(&yld->timer, jiffies + YEALINK_POLLING_DELAY * 10);
 				ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
 			}
-			spin_unlock(&yld->spin_shutdown);
 		} else {
 			/* queue up the next request after a longer delay */
 			/* TODO: How can we detect that the irq was generated
@@ -1510,10 +1497,8 @@ static int yealink_init_device(struct yealink_dev *yld) {
 	if (proto == yld_ctl_protocol_g2) {
 		ret = 0;
 		/* immediately start waiting for a key */
-		spin_lock(&yld->spin_shutdown);
 		if (!yld->shutdown)
 			ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
-		spin_unlock(&yld->spin_shutdown);
 		if (ret)
 			err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
 		if (down_interruptible(&yld->update_sem))
@@ -1560,20 +1545,15 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 	if (yld == NULL)
 		return err;
 
-	spin_lock_irq(&yld->spin_shutdown);
 	yld->shutdown = 1;
-	spin_unlock_irq(&yld->spin_shutdown);
 
-	/* TODO: Do the following 2 lines require the spin-lock? */
 	if (timer_pending(&yld->timer))
 		del_timer(&yld->timer);
 
 	usb_kill_urb(yld->urb_irq);	/* parameter validation in core/urb */
 	usb_kill_urb(yld->ctl_scan.urb_ctl); /* parameter validation in core/urb */
 
-	spin_lock_irq(&yld->spin_shutdown);
 	yld->shutdown = 0;
-	spin_unlock_irq(&yld->spin_shutdown);
 
         if (yld->idev) {
 		if (err)
@@ -1674,7 +1654,6 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	yld->udev = udev;
 	yld->interface = intf;
 	sema_init(&yld->update_sem, 1);
-	spin_lock_init(&yld->spin_shutdown);
 
 	/* get a handle to the interrupt data pipe */
 	pipe = usb_rcvintpipe(udev, endpoint->bEndpointAddress);
