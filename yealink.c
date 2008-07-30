@@ -56,16 +56,13 @@
  *   20060503 Henk	Added privacy, only allow user and group access to sysfs
  *   20060830 Henk	Proper urb cleanup cycle, thanks Ivan Jensen for
  *   			pointing this out.
- *   20080518 Thomas	Added support for P1KH, auto-detect handset model,
+ *   20080730 Thomas	Added support for P1KH, auto-detect handset model,
  *			added B2K keymap,
  *			thanks mmikel for testing with the P1KH.
  *
  * TODO:
- *   - P1KH: Make sure an interrupt is generated whenever it is expected.
- *   - P1K: Get rid of warning due to double-submission of irq urb.
- *   - Protect operations on the timer (may cause kernel panic!?).
  *   - P1KH: Better understand how the ring notes have to be set up.
- *   - Analyze effects of jiffies roll-over, especially in delayed_submit()
+ *   - P1K: Do we need to catch the case where no IRQ is generated?
  */
 
 #include <linux/kernel.h>
@@ -158,10 +155,8 @@ struct yealink_dev {
 	struct usb_device	*udev;		/* usb device */
 	struct usb_interface	*interface;	/* interface for the device */
 	struct usb_endpoint_descriptor *int_endpoint;	/* interrupt EP */
-	int input_refcnt; /* @@@ */
 
 	struct timer_list	timer;		/* timer for key/hook scans */
-	unsigned long		next_expires;
 	struct semaphore	update_sem;	/* TODO: remove!!! */
 
 	struct model_info	*model;
@@ -185,8 +180,7 @@ struct yealink_dev {
 	unsigned	usb_pause:1;
 	spinlock_t	flags_lock;		/* protects above flags */
 
-	/* some more mutex/lock..@@ */
-	
+	unsigned	open:1;
 	unsigned	shutdown:1;
 
 	/* control output channel for repetitive key/hook scans;
@@ -207,6 +201,8 @@ struct yealink_dev {
 	int	notes_len;		/* number of bytes in ring_notes[] */
 	u8	*ring_notes;		/* ptr. to array of ring notes */
 };
+
+static DECLARE_RWSEM(sysfs_rwsema);
 
 static char p1k_model[]  = "P1K";
 static char p4k_model[]  = "P4K";
@@ -245,6 +241,9 @@ static struct model_info model[] = {
 		.protocol = yld_ctl_protocol_g2
 	}
 };
+
+/* forward declaration */
+static void stop_traffic(struct yealink_dev *yld);
 
 /*******************************************************************************
  * Yealink lcd interface
@@ -736,11 +735,13 @@ static int submit_scan_request(struct yealink_dev *yld, int mem_flags)
  * returns <0 upon error
  *          0 no error
  */
+ // TODO: If this function should be called from user context, too, then
+ // the spin_lock has to move to spin_lock_irqsave (ore something)!!!
 static int perform_single_update(struct yealink_dev *yld, int mem_flags)
 {
 	union yld_ctl_packet *ctl_data;
 	enum yld_ctl_protocols proto;
-	int dont_break, update_active, timer_expired, pause;
+	int dont_break, timer_expired, pause;
 	int do_update, do_scan;
 	int differ;
 	u8 val;
@@ -764,7 +765,6 @@ static int perform_single_update(struct yealink_dev *yld, int mem_flags)
 		      (yld->master.b[ix] != yld->copy.b[ix]));
 
 	spin_lock(&yld->flags_lock);
-	update_active = yld->update_active;
 	timer_expired = yld->timer_expired;
 	pause = yld->usb_pause;
 	do_update = (!timer_expired && !pause) || dont_break;
@@ -777,8 +777,7 @@ static int perform_single_update(struct yealink_dev *yld, int mem_flags)
 	if (do_scan) {
 		return submit_scan_request(yld, mem_flags);
 	}
-	}
-	else {
+	} else {	/* yld_ctl_protocol_g2 */
 		do_update = 0; //@@@@
 	}
 
@@ -973,17 +972,20 @@ static int perform_single_update(struct yealink_dev *yld, int mem_flags)
 		 * flag has to be reset. In addition if the timer already
 		 * expired, a scan has to be performed. */
 		if (proto == yld_ctl_protocol_g1) {
-		spin_lock(&yld->flags_lock);
-		timer_expired = yld->timer_expired;
-		pause = yld->usb_pause;
-		yld->timer_expired = timer_expired && pause;
-		yld->scan_active = timer_expired && !pause;
-		yld->update_active = 0;
-		spin_unlock(&yld->flags_lock);
-		dbg("t=%d,u=0,s=%d",yld->timer_expired,yld->scan_active);
-		if (do_scan) {
-			return submit_scan_request(yld, mem_flags);
-		}
+			spin_lock(&yld->flags_lock);
+			timer_expired = yld->timer_expired;
+			pause = yld->usb_pause;
+			do_scan = timer_expired && !pause;
+			yld->timer_expired = timer_expired && pause;
+			yld->scan_active = do_scan;
+			yld->update_active = 0;
+			spin_unlock(&yld->flags_lock);
+			dbg("t=%d,u=0,s=%d",yld->timer_expired,yld->scan_active);
+			if (do_scan)
+				return submit_scan_request(yld, mem_flags);
+		} else {
+			/* yld_ctl_protocol_g2 */
+			//... @@
 		}
 	}
 	return ret;
@@ -1004,19 +1006,17 @@ static void timer_callback(unsigned long ylda)
 	proto = yld->model->protocol;
 
 	if (proto == yld_ctl_protocol_g1) {
-		int timer_expired, scan_active, update_active, pause;
+		int timer_expired, scan_active;
 		int do_submit;
 
 		spin_lock_irq(&yld->flags_lock);
 		scan_active = yld->scan_active;
-		update_active = yld->update_active;
 		timer_expired = yld->timer_expired;
-		pause = yld->usb_pause;
-		yld->scan_active = !(pause || update_active) || scan_active;
-		yld->timer_expired = pause || update_active || scan_active;
-		do_submit = !yld->timer_expired;
+		do_submit = !yld->usb_pause && !yld->update_active && !scan_active;
+		yld->scan_active = scan_active || do_submit;
+		yld->timer_expired = !do_submit;
 		spin_unlock_irq(&yld->flags_lock);
-		dbg("t=%d,u=%d,s=%d",yld->timer_expired,update_active,yld->scan_active);
+		dbg("t=%d,u=%d,s=%d",yld->timer_expired,yld->update_active,yld->scan_active);
 		
 		if (unlikely(timer_expired))
 			warn("timeout was not serviced in time!");
@@ -1030,9 +1030,8 @@ static void timer_callback(unsigned long ylda)
 				(void) submit_scan_request(yld, GFP_ATOMIC);
 			}
 		}
-	}
-	else {
-		// handle g2
+	} else {	/* yld_ctl_protocol_g2 */
+		
 	}
 }
 
@@ -1051,15 +1050,14 @@ static void urb_irq_callback(struct urb *urb)
 	data0 = (proto == yld_ctl_protocol_g1) ?
 	          yld->irq_data->g1.data[0] : yld->irq_data->g2.data[0];
 
-	if (status)
+	if (status) {
 		err("%s - urb status %d", __FUNCTION__, status);
-	//@@ shouldn't we make sure not do continue if we are shutting down??
-	// maybe the cm109 driver has a solution
+		goto send_next;		/* do not process the irq_data */
+	}
 
 	switch (yld->irq_data->cmd) {
 	case CMD_KEYPRESS:
 		yld->master.s.keynum = data0;
-		yld->stat_ix = offsetof(struct yld_status, keynum);
 		break;
 
 	case CMD_HOOKPRESS:
@@ -1067,7 +1065,7 @@ static void urb_irq_callback(struct urb *urb)
 		if (yld->hookstate == ret)
 			break;
 		dbg("hookstate: %x", ret);
-		if (yld->input_refcnt > 0) {
+		if (yld->open) {
 			input_report_key(yld->idev, KEY_PHONE, ret >> 4);
 			input_sync(yld->idev);
 		}
@@ -1077,7 +1075,7 @@ static void urb_irq_callback(struct urb *urb)
 	case CMD_SCANCODE:
 		dbg("get scancode %x", data0);
 		ret = yld->model->keycode(data0);
-		if (yld->input_refcnt > 0)
+		if (yld->open)
 			report_key(yld, ret);
 		if (ret < 0 && data0 != 0xff)
 			info("unknown scancode 0x%02x", data0);
@@ -1091,17 +1089,20 @@ static void urb_irq_callback(struct urb *urb)
 		err("unexpected response %x", yld->irq_data->cmd);
 	}
 
+send_next:
 	if (proto == yld_ctl_protocol_g1) {
 		ret = perform_single_update(yld, GFP_ATOMIC);
 		if (ret)
-			err("%s - perform_single_update failed %d", __FUNCTION__, ret);
+			err("%s - perform_single_update failed %d",
+			    __FUNCTION__, ret);
 	} else {
 		/* always wait for a key or some other interrupt */
-		ret = 0;
-		if (!yld->shutdown)
+		if (likely(!yld->shutdown)) {
 			ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
-		if (ret)
-			err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
+			if (ret)
+				err("%s - usb_submit_urb failed %d",
+				    __FUNCTION__, ret);
+		}
 	}
 }
 
@@ -1120,11 +1121,6 @@ static void urb_ctl_callback(struct urb *urb)
 	if (status)
 		err("%s - urb status %d", __FUNCTION__, status);
 
-	if (!yld->model) {
-		err("%s - unknown model", __FUNCTION__);
-		return;
-	}
-
 	proto = yld->model->protocol;
 
 	switch (yld->ctl_data->cmd) {
@@ -1133,10 +1129,8 @@ static void urb_ctl_callback(struct urb *urb)
 	case CMD_SCANCODE:
 		if (proto == yld_ctl_protocol_g1) {
 			/* Expect a response on the irq endpoint! */
-			/* TODO: Do we need to catch the case where no IRQ is generated? */
-			if (likely(!yld->shutdown)) {
+			if (likely(!yld->shutdown))
 				ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
-			}
 		} else {
 			/* queue up the next request after a longer delay */
 			/* TODO: How can we detect that the irq was generated
@@ -1188,38 +1182,36 @@ static int input_ev(struct input_dev *dev, unsigned int type,
 
 static int input_open(struct input_dev *dev)
 {
-	struct yealink_dev *yld =
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
-				dev->private;
+	struct yealink_dev *yld = dev->private;
 #else
-				input_get_drvdata(dev);
+	struct yealink_dev *yld = input_get_drvdata(dev);
 #endif
-	yld->input_refcnt++;
-	dbg("%s - input device opened %d times", __FUNCTION__, yld->input_refcnt);
+
+	down_write(&sysfs_rwsema);
+	yld->open = 1;
+	up_write(&sysfs_rwsema);
+
 	return 0;
 }
 
 static void input_close(struct input_dev *dev)
 {
-	struct yealink_dev *yld =
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
-				dev->private;
+	struct yealink_dev *yld = dev->private;
 #else
-				input_get_drvdata(dev);
+	struct yealink_dev *yld = input_get_drvdata(dev);
 #endif
 
-	if (yld->input_refcnt > 0)
-		yld->input_refcnt--;
-	else
-		err("%s - failed decrementing input_refcnt", __FUNCTION__);
-	dbg("%s - input device opened %d times", __FUNCTION__, yld->input_refcnt);
+	down_write(&sysfs_rwsema);
+	yld->open = 0;
+	up_write(&sysfs_rwsema);
+	stop_traffic(yld);
 }
 
 /*******************************************************************************
  * sysfs interface
  ******************************************************************************/
-
-static DECLARE_RWSEM(sysfs_rwsema);
 
 /* Interface to the 7-segments translation table aka. char set.
  */
@@ -1704,7 +1696,7 @@ static int start_traffic(struct yealink_dev *yld)
 static void stop_traffic(struct yealink_dev *yld)
 {
 	yld->shutdown = 1;
-	smp_wmb();			/* make sure other CPUs see this */
+	smp_wmb();			/* ??make sure other CPUs see this */
 
 	if (timer_pending(&yld->timer))
 		del_timer(&yld->timer);
