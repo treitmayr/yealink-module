@@ -58,6 +58,9 @@ enum yld_ctl_protocols {
   yld_ctl_protocol_g2
 };
 
+#define USB_PKT_LEN(p) (((p) == yld_ctl_protocol_g1) ? \
+			USB_PKT_LEN_G1 : USB_PKT_LEN_G2)
+
 /* version ranges determined according to
  * http://www.devbase.at/svn/view.cgi/yealink-logs/version-numbers.txt?root=experimental
  */
