@@ -70,6 +70,7 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/spinlock.h>
 #include <linux/rwsem.h>
 #include <linux/timer.h>
 #include <linux/usb/input.h>
@@ -180,6 +181,7 @@ struct yealink_dev {
 	unsigned	usb_pause:1;
 	spinlock_t	flags_lock;		/* protects above flags */
 
+	unsigned	dirty:1;
 	unsigned	open:1;
 	unsigned	shutdown:1;
 
@@ -732,83 +734,42 @@ static int submit_scan_request(struct yealink_dev *yld, int mem_flags)
 }
 
 /* keep stat_master & stat_copy in sync.
- * returns <0 upon error
- *          0 no error
+ * returns  = 0 if no packet was prepared (= no releavant differences found)
+ *         /= 0 if a command was assembled in yld->ctl_data
  */
- // TODO: If this function should be called from user context, too, then
- // the spin_lock has to move to spin_lock_irqsave (ore something)!!!
-static int perform_single_update(struct yealink_dev *yld, int mem_flags)
+static int prepare_update_cmd(struct yealink_dev *yld)
 {
 	union yld_ctl_packet *ctl_data;
 	enum yld_ctl_protocols proto;
-	int dont_break, timer_expired, pause;
-	int do_update, do_scan;
 	int differ;
 	u8 val;
 	u8 *data;
 	u8 offset;
 	int i, ix, len;
-	int ret = 0;
-
-	dbg("%s", __FUNCTION__);
 
 	proto = yld->model->protocol;
 	ix = yld->stat_ix;
-
-	/* TODO for next 15 lines: Handle G2 differently!! */
-	if (proto == yld_ctl_protocol_g1) {
-	/* writing ringtone notes must not be interrupted */
-	/* same for key scan */
-	dont_break = ((ix == offsetof(struct yld_status, ringnote_mod)) &&
-		      (yld->notes_ix != 0)) ||
-		     ((ix == offsetof(struct yld_status, keynum)) &&
-		      (yld->master.b[ix] != yld->copy.b[ix]));
-
-	spin_lock(&yld->flags_lock);
-	timer_expired = yld->timer_expired;
-	pause = yld->usb_pause;
-	do_update = (!timer_expired && !pause) || dont_break;
-	do_scan = !do_update && !pause;
-	yld->timer_expired = timer_expired && !do_scan;
-	yld->update_active = do_update;
-	yld->scan_active = do_scan;
-	spin_unlock(&yld->flags_lock);
-	dbg("t=%d,u=%d,s=%d",yld->timer_expired,do_update,do_scan);
-	if (do_scan) {
-		return submit_scan_request(yld, mem_flags);
-	}
-	} else {	/* yld_ctl_protocol_g2 */
-		do_update = 0; //@@@@
-	}
-
-	if (!do_update) {
-		dbg("pausing updates");
-		return 0;
-	}
-
 	ctl_data = yld->ctl_data;
-
 	data = (proto == yld_ctl_protocol_g1) ?
 		ctl_data->g1.data : ctl_data->g2.data;
 
-	memset(ctl_data, 0, sizeof(*ctl_data));
+	ctl_data->cmd = 0;		/* no packet prepared so far */
 
 	/* find update candidates: copy != master */
-	/* the big loop for processing mismatches */
+	/* the big loop for processing any mismatches */
 	do {
 		differ = 0;
 		/* the tight loop for finding mismatches */
 		do {
 			val = yld->master.b[ix];
-			if (val != yld->copy.b[ix]) {
-				differ = 1;
-				break;
+			differ = (val != yld->copy.b[ix]);
+			if (!differ) {
+				ix++;
+				if (ix >= sizeof(yld->master))
+					ix = 0;
 			}
-			ix++;
-			if (ix >= sizeof(yld->master))
-				ix = 0;
-		} while (ix != yld->stat_ix);
-		
+		} while (!differ && (ix != yld->stat_ix));
+
 		if (!differ)		/* no updates needed */
 			break;
 
@@ -956,16 +917,153 @@ static int perform_single_update(struct yealink_dev *yld, int mem_flags)
 		ix++;
 		if (ix >= sizeof(yld->master))
 			ix = 0;
-	} while (ctl_data->cmd == 0);
+	} while ((ctl_data->cmd == 0) && (ix != yld->stat_ix));
 
 	yld->stat_ix = ix;
 
 	if (ctl_data->cmd != 0) {
 		/* calculate the checksum */
 		pkt_update_checksum(ctl_data, USB_PKT_LEN(proto));
+		return 1;
+	}
+	return 0;
+}
+ 
+static int poke_update_from_userspace(struct yealink_dev *yld)
+{
+	enum yld_ctl_protocols proto;
+	int timer_expired, idle;
+	int do_update, do_scan;
+	int send_update;
+	int ret = 0;
+	unsigned long spin_flags;
+
+	dbg("%s", __FUNCTION__);
+
+	if (yld->usb_pause)
+		BUG();
+
+	proto = yld->model->protocol;
+
+	/* TODO for next 15 lines: Handle G2 differently!! */
+	if (proto == yld_ctl_protocol_g1) {
+		spin_lock_irqsave(&yld->flags_lock, spin_flags);
+		timer_expired = yld->timer_expired;
+		idle = !yld->update_active && !yld->scan_active;
+		do_update = idle && !timer_expired;
+		do_scan = idle && timer_expired;
+		yld->timer_expired = timer_expired && !idle;
+		yld->dirty = yld->update_active && !do_update;
+		yld->update_active = yld->update_active || do_update;
+		yld->scan_active = yld->scan_active || do_scan;
+		spin_unlock_irqrestore(&yld->flags_lock, spin_flags);
+		dbg("t=%d,u=%d,s=%d",yld->timer_expired,yld->update_active,yld->scan_active);
+		if (yld->dirty) dbg("set dirty");
+
+		if (do_scan) {
+			return submit_scan_request(yld, GFP_KERNEL);
+		}
+	} else {	/* yld_ctl_protocol_g2 */
+		do_update = 0; //@@@@
+	}
+
+	if (!do_update) {
+		dbg("cycle already active");
+		return 0;
+	}
+
+	/* find update candidates: copy != master */
+	send_update = prepare_update_cmd(yld);
+
+	if (send_update) {
 		/* submit the assembled command */
 		if (likely(!yld->shutdown)) {
-			ret = usb_submit_urb(yld->urb_ctl, mem_flags);
+			ret = usb_submit_urb(yld->urb_ctl, GFP_KERNEL);
+		}
+	} else {
+		/* As no updates have to be performed, the update_active
+		 * flag has to be reset. In addition if the timer already
+		 * expired, a scan has to be performed. */
+		if (proto == yld_ctl_protocol_g1) {
+			spin_lock_irqsave(&yld->flags_lock, spin_flags);
+			do_scan = yld->timer_expired;
+			yld->scan_active = do_scan;
+			yld->timer_expired = 0;
+			yld->update_active = 0;
+			spin_unlock_irqrestore(&yld->flags_lock, spin_flags);
+			dbg("t=0,u=0,s=%d",yld->scan_active);
+			if (do_scan)
+				ret = submit_scan_request(yld, GFP_KERNEL);
+		} else {
+			/* yld_ctl_protocol_g2 */
+			//... @@
+		}
+	}
+	return ret;
+}
+
+static int perform_single_update(struct yealink_dev *yld)
+{
+	enum yld_ctl_protocols proto;
+	int dont_break, timer_expired, pause, dirty;
+	int do_update, do_scan;
+	int send_update;
+	int ix;
+	int ret = 0;
+	int max_dirty_scans = 2;
+
+	dbg("%s", __FUNCTION__);
+
+	proto = yld->model->protocol;
+
+rescan_dirty:
+	ix = yld->stat_ix;
+
+	/* TODO for next 15 lines: Handle G2 differently!! */
+	if (proto == yld_ctl_protocol_g1) {
+		/* writing ringtone notes must not be interrupted */
+		/* same for key scan */
+		dont_break = ((ix == offsetof(struct yld_status, ringnote_mod)) &&
+			      (yld->notes_ix != 0)) ||
+			     ((ix == offsetof(struct yld_status, keynum)) &&
+			      (yld->master.b[ix] != yld->copy.b[ix]));
+
+		spin_lock(&yld->flags_lock);
+		timer_expired = yld->timer_expired;
+		pause = yld->usb_pause;
+		do_update = (!timer_expired && !pause) || dont_break;
+		do_scan = !do_update && !pause;
+		yld->timer_expired = timer_expired && !do_scan;
+		yld->update_active = do_update;
+		yld->scan_active = do_scan;
+		yld->dirty = 0;
+		spin_unlock(&yld->flags_lock);
+		dbg("t=%d,u=%d,s=%d",yld->timer_expired,do_update,do_scan);
+
+		if (do_scan) {
+			return submit_scan_request(yld, GFP_ATOMIC);
+		}
+	} else {	/* yld_ctl_protocol_g2 */
+		do_update = 0; //@@@@
+	}
+
+	if (!do_update) {
+		dbg("pausing updates");
+		return 0;
+	}
+
+	/* find update candidates: copy != master */
+	send_update = prepare_update_cmd(yld);
+	if (!send_update && yld->dirty) {
+		/* does this catch all corner cases? @@ */
+		yld->dirty = 0;
+		send_update = prepare_update_cmd(yld);
+	}
+
+	if (send_update) {
+		/* submit the assembled command */
+		if (likely(!yld->shutdown)) {
+			ret = usb_submit_urb(yld->urb_ctl, GFP_ATOMIC);
 		}
 	} else {
 		/* As no updates have to be performed, the update_active
@@ -979,10 +1077,20 @@ static int perform_single_update(struct yealink_dev *yld, int mem_flags)
 			yld->timer_expired = timer_expired && pause;
 			yld->scan_active = do_scan;
 			yld->update_active = 0;
+			dirty = yld->dirty = yld->dirty && !do_scan;
 			spin_unlock(&yld->flags_lock);
 			dbg("t=%d,u=0,s=%d",yld->timer_expired,yld->scan_active);
 			if (do_scan)
-				return submit_scan_request(yld, mem_flags);
+				ret = submit_scan_request(yld, GFP_ATOMIC);
+			else
+			if (dirty) {
+				dbg("got dirty during comparison!!");
+				max_dirty_scans--;
+				if (max_dirty_scans > 0)
+					goto rescan_dirty;
+				else
+					dbg("giving up until next timeout!!");
+			}
 		} else {
 			/* yld_ctl_protocol_g2 */
 			//... @@
@@ -1091,7 +1199,7 @@ static void urb_irq_callback(struct urb *urb)
 
 send_next:
 	if (proto == yld_ctl_protocol_g1) {
-		ret = perform_single_update(yld, GFP_ATOMIC);
+		ret = perform_single_update(yld);
 		if (ret)
 			err("%s - perform_single_update failed %d",
 			    __FUNCTION__, ret);
@@ -1136,17 +1244,17 @@ static void urb_ctl_callback(struct urb *urb)
 			/* TODO: How can we detect that the irq was generated
 			 *       as expected? */
 			/* TODO: DELAY + need to check the pause flag!! */
-			ret = perform_single_update(yld, GFP_ATOMIC);
+			ret = perform_single_update(yld);
 		}
 		break;
 	default:
 		if (proto == yld_ctl_protocol_g1) {
 			/* immediately send new command */
-			ret = perform_single_update(yld, GFP_ATOMIC);
+			ret = perform_single_update(yld);
 		} else {
 			/* queue up the next request after some small delay */
 			/* TODO: DELAY + need to check the pause flag!! */
-			ret = perform_single_update(yld, GFP_ATOMIC);
+			ret = perform_single_update(yld);
 			//		YEALINK_COMMAND_DELAY_G2);
 		}
 		break;
@@ -1295,6 +1403,7 @@ static ssize_t store_line(struct device *dev, const char *buf, size_t count,
 {
 	struct yealink_dev *yld;
 	int i;
+	int ret = count;
 
 	down_write(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
@@ -1308,14 +1417,20 @@ static ssize_t store_line(struct device *dev, const char *buf, size_t count,
 	for (i = 0; i < len; i++)
 		setChar(yld, el++, buf[i]);
 
+	if (submit && (poke_update_from_userspace(yld) != 0))
+		ret = -ERESTARTSYS;
+
 	up_write(&sysfs_rwsema);
 
+	return ret;
+#if 0
 	if (submit && yld->model && yld->model->protocol == yld_ctl_protocol_g2) {
 		if (down_interruptible(&yld->update_sem)) //??
 			return -ERESTARTSYS;
 		//TODO submit_next_request(yld, GFP_KERNEL, 0);
 	}
 	return count;
+#endif
 }
 
 static ssize_t store_line1(struct device *dev, struct device_attribute *attr,
@@ -1373,6 +1488,7 @@ static ssize_t set_icon(struct device *dev, const char *buf, size_t count,
 	enum yld_ctl_protocols proto;
 	int early_wait = 0;
 	int i;
+	int ret = count;
 
 	down_write(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
@@ -1402,15 +1518,21 @@ static ssize_t set_icon(struct device *dev, const char *buf, size_t count,
 			break;
 		}
 	}
+
+	if (poke_update_from_userspace(yld) != 0)
+		ret = -ERESTARTSYS;
+
 	up_write(&sysfs_rwsema);
 
+	return ret;
+#if 0
 	if (proto == yld_ctl_protocol_g2) {
 		if (!early_wait && down_interruptible(&yld->update_sem))
 			return -ERESTARTSYS;
 		//TODO submit_next_request(yld, GFP_KERNEL, 0);
 	}
-
 	return count;
+#endif
 }
 
 static ssize_t show_icon(struct device *dev, struct device_attribute *attr,
@@ -1436,6 +1558,7 @@ static ssize_t store_ringtone(struct device *dev,
 	struct yealink_dev *yld;
 	int stopped;
 	int i;
+	int ret = count;
 
 	down_write(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
@@ -1462,7 +1585,8 @@ static ssize_t store_ringtone(struct device *dev,
 		set_ringnotes(yld, (char *)buf, count);
 		yld->master.s.ringnote_mod++;
 		yld->usb_pause = 0;
-		/* for now just let the timeout restart the cycle */
+		if (poke_update_from_userspace(yld) != 0)
+			ret = -ERESTARTSYS;
 	} else {
 		err("Could not stop update cycle to write ringnotes!");
 	}
@@ -1481,7 +1605,7 @@ static ssize_t store_ringtone(struct device *dev,
 	}*/
 
 	up_write(&sysfs_rwsema);
-	return count;
+	return ret;
 }
 
 /* Get a list phone models with the currently selected one. */
@@ -1640,6 +1764,7 @@ static void restore_state(struct yealink_dev *yld)
 	yld->update_active = 0;
 	yld->timer_expired = 0;
 	yld->usb_pause = 0;
+	yld->dirty = 0;
 }
 
 static int init_state(struct yealink_dev *yld)
@@ -1681,14 +1806,15 @@ static int start_traffic(struct yealink_dev *yld)
 	int ret = 0;
 
 	proto = yld->model->protocol;
-	if (unlikely(!yld->shutdown)) {
-		if (proto == yld_ctl_protocol_g2) {
+	if (likely(!yld->shutdown)) {
+		if (proto == yld_ctl_protocol_g1) {
+			mod_timer(&yld->timer, jiffies + 2);
+		} else {
 			/* immediately start waiting for a key */
 			ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
 		}
-		/* start the timer */
 		if (ret == 0)
-			mod_timer(&yld->timer, jiffies + 2);
+			ret = poke_update_from_userspace(yld);
 	}
 	return ret;
 }
