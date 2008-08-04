@@ -27,25 +27,27 @@
 
 /* "Generation 1" models use 16 byte packets */
 
+#define USB_PKT_DATA_LEN_G1	11
+#define USB_PKT_LEN_G1	sizeof(struct yld_ctl_packet_g1)
+
 struct yld_ctl_packet_g1 {
 	u8	cmd;		/* command code, see below */
 	u8	size;		/* 1-11, size of used data bytes. */
 	u16	offset;		/* internal packet offset */
-	u8	data[11];
+	u8	data[USB_PKT_DATA_LEN_G1];
 	s8	sum;		/* negative sum of 15 preceding bytes */
 } __attribute__ ((packed));
 
-#define USB_PKT_LEN_G1	sizeof(struct yld_ctl_packet_g1)
-
 /* "Generation 2" models use 8 byte packets */
+
+#define USB_PKT_LEN_G2	sizeof(struct yld_ctl_packet_g2)
+#define USB_PKT_DATA_LEN_G2	6
 
 struct yld_ctl_packet_g2 {
 	u8	cmd;		/* command code, see below */
-	u8	data[6];
+	u8	data[USB_PKT_DATA_LEN_G2];
 	s8	sum;		/* negative sum of 7 preceding bytes */
 } __attribute__ ((packed));
-
-#define USB_PKT_LEN_G2	sizeof(struct yld_ctl_packet_g2)
 
 union yld_ctl_packet {
 	u8	cmd;		/* command code is always the first byte */
@@ -60,6 +62,9 @@ enum yld_ctl_protocols {
 
 #define USB_PKT_LEN(p) (((p) == yld_ctl_protocol_g1) ? \
 			USB_PKT_LEN_G1 : USB_PKT_LEN_G2)
+
+#define USB_PKT_DATA_LEN(p) (((p) == yld_ctl_protocol_g1) ? \
+			USB_PKT_DATA_LEN_G1 : USB_PKT_DATA_LEN_G2)
 
 /* version ranges determined according to
  * http://www.devbase.at/svn/view.cgi/yealink-logs/version-numbers.txt?root=experimental

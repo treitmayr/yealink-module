@@ -179,9 +179,9 @@ struct yealink_dev {
 	unsigned	update_active:1;
 	unsigned	timer_expired:1;
 	unsigned	usb_pause:1;
+	unsigned	dirty:1;
 	spinlock_t	flags_lock;		/* protects above flags */
 
-	unsigned	dirty:1;
 	unsigned	open:1;
 	unsigned	shutdown:1;
 
@@ -189,6 +189,7 @@ struct yealink_dev {
 	   TODO: possibly revert to individual fields, like with irq channel */
 
 	char	phys[64];		/* physical device path */
+	char	uniq[27];		/* unique(?) device number */
 
 	u8 lcdMap[ARRAY_SIZE(lcdMap)];	/* state of LCD, LED ... */
 	int	key_code;		/* last reported key	 */
@@ -741,7 +742,6 @@ static int prepare_update_cmd(struct yealink_dev *yld)
 {
 	union yld_ctl_packet *ctl_data;
 	enum yld_ctl_protocols proto;
-	int differ;
 	u8 val;
 	u8 *data;
 	u8 offset;
@@ -758,20 +758,18 @@ static int prepare_update_cmd(struct yealink_dev *yld)
 	/* find update candidates: copy != master */
 	/* the big loop for processing any mismatches */
 	do {
-		differ = 0;
-		/* the tight loop for finding mismatches */
+		/* find update candidates: copy != master */
 		do {
 			val = yld->master.b[ix];
-			differ = (val != yld->copy.b[ix]);
-			if (!differ) {
-				ix++;
-				if (ix >= sizeof(yld->master))
-					ix = 0;
-			}
-		} while (!differ && (ix != yld->stat_ix));
+			if (val != yld->copy.b[ix])
+				goto handle_difference;
+			if (unlikely(++ix >= sizeof(yld->master)))
+				ix = 0;
+		} while (ix != yld->stat_ix);
 
-		if (!differ)		/* no updates needed */
-			break;
+		break;
+
+handle_difference:
 
 		yld->copy.b[ix] = val;
 
@@ -1010,7 +1008,7 @@ static int perform_single_update(struct yealink_dev *yld)
 	int send_update;
 	int ix;
 	int ret = 0;
-	int max_dirty_scans = 2;
+	int max_dirty_scans = 2;	/* allow a total of two status scans */
 
 	dbg("%s", __FUNCTION__);
 
@@ -1083,13 +1081,18 @@ rescan_dirty:
 			if (do_scan)
 				ret = submit_scan_request(yld, GFP_ATOMIC);
 			else
-			if (dirty) {
+			if (unlikely(dirty)) {
+				/* This can only happen if another processor
+				 * modified the master buffer we did not catch
+				 * that modification anymore during the
+				 * comparison -> compare a 2nd time, but not
+				 * more to not get caught up inside IRQ context!
+				 */
 				dbg("got dirty during comparison!!");
 				max_dirty_scans--;
 				if (max_dirty_scans > 0)
 					goto rescan_dirty;
-				else
-					dbg("giving up until next timeout!!");
+				/* else give up until next timeout */
 			}
 		} else {
 			/* yld_ctl_protocol_g2 */
@@ -1669,7 +1672,7 @@ static int update_version_init(struct yealink_dev *yld)
 {
 	union yld_ctl_packet ctl_data, int_data;
 	enum yld_ctl_protocols proto;
-	int len;
+	int len, i;
 	u8 *data;
 	u16 version;
 	int ret = 0;
@@ -1711,16 +1714,16 @@ static int update_version_init(struct yealink_dev *yld)
 		yld->model = (info_idx != model_info_unknown) ?
 				&model[info_idx] : NULL;
 	}
-	if (yld->model) {
-		info("Detected Model %s (Version 0x%04x)",
-			yld->model->name, version);
-	}
-	else {
+	if (!yld->model) {
 		int pid = le16_to_cpu(yld->udev->descriptor.idProduct);
 		warn(KERN_INFO "Yealink model not supported: "
 			"PID %04x, version 0x%04x.", pid, version);
 		return -ENODEV;
 	}
+
+	info("Detected Model %s (Version 0x%04x)",
+		yld->model->name, version);
+	sprintf(yld->uniq, "%04x", version);
 
 	/* prepare and submit next command */
 	ctl_data.cmd = CMD_INIT;
@@ -1732,18 +1735,16 @@ static int update_version_init(struct yealink_dev *yld)
 	if (ret != 0)
 		return ret;
 
-	/* TODO: Store version & serial number, if they are of any use 
-	 * (eg. for resume?) */
-	if (proto == yld_ctl_protocol_g1) {
-		print_hex_dump(KERN_INFO, __FILE__": Serial Number ",
-				DUMP_PREFIX_NONE, 16, 1,
-				int_data.g1.data, sizeof(int_data.g1.data), 0);
+	len = USB_PKT_DATA_LEN(proto);
+	if ((len * 2 + 5) > sizeof(yld->uniq)) {
+		BUG();
+		return 0;
 	}
-	else {
-		print_hex_dump(KERN_INFO, __FILE__": Serial Number ",
-				DUMP_PREFIX_NONE, 16, 1,
-				int_data.g2.data, sizeof(int_data.g2.data), 0);
+
+	for (i = 0; i < len; i++) {
+	  sprintf(yld->uniq+4+(i*2), "%02x", data[i]);
 	}
+	info("Serial Number %s", yld->uniq+4);
 	return 0;
 }
 
@@ -1822,7 +1823,7 @@ static int start_traffic(struct yealink_dev *yld)
 static void stop_traffic(struct yealink_dev *yld)
 {
 	yld->shutdown = 1;
-	smp_wmb();			/* ??make sure other CPUs see this */
+	smp_wmb();			/* make sure other CPUs see this */
 
 	if (timer_pending(&yld->timer))
 		del_timer(&yld->timer);
@@ -2065,7 +2066,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 //	input_dev->name = nfo->name; TODO better driver messages / registration
 //	input_dev->name = yld_device[i].name;
 	input_dev->name = "yealink";
-	//input_dev->uniq = "yealink";@@??
+	input_dev->uniq = yld->uniq;
 	input_dev->phys = yld->phys;
 	usb_to_input_id(udev, &input_dev->id);
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,24)
