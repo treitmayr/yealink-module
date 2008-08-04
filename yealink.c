@@ -1670,7 +1670,7 @@ static struct attribute_group yld_attr_group = {
 
 static int update_version_init(struct yealink_dev *yld)
 {
-	union yld_ctl_packet ctl_data, int_data;
+	union yld_ctl_packet *ctl_data, *int_data;
 	enum yld_ctl_protocols proto;
 	int len, i;
 	u8 *data;
@@ -1687,22 +1687,29 @@ static int update_version_init(struct yealink_dev *yld)
 
 	proto = yld->model->protocol;
 	len = USB_PKT_LEN(proto);
-	memset(&ctl_data, 0, len);
-	memset(&int_data, 0, len);
+
+	ctl_data = kzalloc(len, GFP_KERNEL);
+	if (!ctl_data)
+		return -ENOMEM;
+	int_data = kzalloc(len, GFP_KERNEL);
+	if (!int_data) {
+		kfree(ctl_data);
+		return -ENOMEM;
+	}
 
 	/* prepare the VERSION command */
-	ctl_data.cmd = CMD_VERSION;
+	ctl_data->cmd = CMD_VERSION;
 	if (proto == yld_ctl_protocol_g1)
-		ctl_data.g1.size = 2;
-	pkt_update_checksum(&ctl_data, len);
+		ctl_data->g1.size = 2;
+	pkt_update_checksum(ctl_data, len);
 	
-	ret = submit_cmd_int_sync(yld, &ctl_data, len, &int_data, len);
+	ret = submit_cmd_int_sync(yld, ctl_data, len, int_data, len);
 	if (ret != 0)
-		return ret;
+		goto leave_clean;
 
 	/* update model information */
-	data = (proto == yld_ctl_protocol_g1) ? int_data.g1.data :
-						int_data.g2.data;
+	data = (proto == yld_ctl_protocol_g1) ? int_data->g1.data :
+						int_data->g2.data;
 	version = (data[0] << 8) | data[1];
 	if (proto == yld_ctl_protocol_g1) {
 		/* can only auto-detect G1 devices for now */
@@ -1718,7 +1725,8 @@ static int update_version_init(struct yealink_dev *yld)
 		int pid = le16_to_cpu(yld->udev->descriptor.idProduct);
 		warn(KERN_INFO "Yealink model not supported: "
 			"PID %04x, version 0x%04x.", pid, version);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto leave_clean;
 	}
 
 	info("Detected Model %s (Version 0x%04x)",
@@ -1726,26 +1734,31 @@ static int update_version_init(struct yealink_dev *yld)
 	sprintf(yld->uniq, "%04x", version);
 
 	/* prepare and submit next command */
-	ctl_data.cmd = CMD_INIT;
+	ctl_data->cmd = CMD_INIT;
 	if (proto == yld_ctl_protocol_g1)
-		ctl_data.g1.size = sizeof(ctl_data.g1.data);
-	pkt_update_checksum(&ctl_data, len);
+		ctl_data->g1.size = sizeof(ctl_data->g1.data);
+	pkt_update_checksum(ctl_data, len);
 	
-	ret = submit_cmd_int_sync(yld, &ctl_data, len, &int_data, len);
+	ret = submit_cmd_int_sync(yld, ctl_data, len, int_data, len);
 	if (ret != 0)
 		return ret;
 
 	len = USB_PKT_DATA_LEN(proto);
 	if ((len * 2 + 5) > sizeof(yld->uniq)) {
 		BUG();
-		return 0;
+		ret = -ENODEV;
+		goto leave_clean;
 	}
 
 	for (i = 0; i < len; i++) {
 	  sprintf(yld->uniq+4+(i*2), "%02x", data[i]);
 	}
 	info("Serial Number %s", yld->uniq+4);
-	return 0;
+
+leave_clean:
+        kfree(int_data);
+        kfree(ctl_data);
+	return ret;
 }
 
 static void restore_state(struct yealink_dev *yld)
