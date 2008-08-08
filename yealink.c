@@ -190,11 +190,13 @@ struct yealink_dev {
 
 	char	phys[64];		/* physical device path */
 	char	uniq[27];		/* unique(?) device number */
+	char	name[20];		/* full device name */
 
 	u8 lcdMap[ARRAY_SIZE(lcdMap)];	/* state of LCD, LED ... */
 	int	key_code;		/* last reported key	 */
 	u8	last_cmd;		/* last scan command: key/hook */
-	u8	hookstate;		/* P4K hookstate	*/
+	u8	hookstate;		/* hookstate (B2K, P4K)	*/
+	u8	pstn_ring;		/* PSTN ring state (B2K) */
 	int	stat_ix;		/* index in master/copy */
 	union {
 		struct yld_status s;
@@ -318,22 +320,6 @@ static u8 default_ringtone_g1[] = {
 	0x00, 0x00		/* end of sequence */
 };
 
-#if 0
-/* not working: */
-static u8 default_ringtone_g2[] = {
-	0xEF,		/* volume [0-255] */
-	0x1E, 0x0C,	/* 1250 [hz], 12/100 [s] */
-	0x18, 0x0C,	/* 1000 [hz], 12/100 [s] */
-	0x1E, 0x0C,
-	0x18, 0x0C,
-	0x1E, 0x0C,
-	0x18, 0x0C,
-	0x1E, 0x0C,
-	0x18, 0x0C,
-	0xFF, 0xFE,	/* silent, ? [s] */
-	0x00, 0x00	/* end of sequence */
-};
-#endif
 static u8 default_ringtone_g2[] = {
 	0xFF,		/* volume [0-255] */
 	0x1E, 0x0C,	/* 1250 [hz], 12/100 [s] */
@@ -436,7 +422,7 @@ static int map_p1k_to_key(unsigned scancode)
 		KEY_LEFTSHIFT | KEY_3 << 8,	/* 32 #		*/
 		KEY_UP				/* 33 up	*/
 	};
-	if(scancode & 0x8)
+	if(scancode & 0x108)
 		return -EINVAL;
 	scancode = (scancode & 7) | ((scancode & 0xf0) >> 1);
 
@@ -468,7 +454,7 @@ static int map_p4k_to_key(unsigned scancode)
 		KEY_6,				/* 02 6		*/
 		KEY_9,				/* 03 9		*/
 		KEY_LEFTSHIFT | KEY_3 << 8,	/* 04 #		*/
-		KEY_LEFTSHIFT | KEY_SLASH << 8,	/* 05 HELP	*/
+		KEY_HELP,			/* 05 HELP	*/
 		-EINVAL,			/* 06		*/
 		-EINVAL,			/* 07		*/
 		KEY_RIGHT,			/* 10 OUT	*/
@@ -488,25 +474,35 @@ static int map_p4k_to_key(unsigned scancode)
 		-EINVAL,			/* 26		*/
 		-EINVAL,			/* 27		*/
 		KEY_DOWN,			/* 30 DOWN	*/
-		KEY_V,				/* 31 VOL+	*/
+		KEY_VOLUMEUP,			/* 31 VOL+	*/
 		KEY_UP,				/* 32 UP	*/
 		KEY_BACKSPACE,			/* 33 DEL	*/
 		KEY_LEFT,			/* 34 IN	*/
 		-EINVAL,			/* 35		*/
 		-EINVAL,			/* 36		*/
 		-EINVAL,			/* 37		*/
-		KEY_LEFTSHIFT | KEY_V << 8,	/* 40 VOL-	*/
+		KEY_VOLUMEDOWN,			/* 40 VOL-	*/
 		-EINVAL,			/* 41		*/
 		-EINVAL,			/* 42		*/
 		-EINVAL,			/* 43		*/
 		KEY_R				/* 44 REDIAL	*/
 	};
-	if(scancode & 0x8)
-		return -EINVAL;
-	scancode = (scancode & 7) | ((scancode & 0xf0) >> 1);
-
-	if(scancode < ARRAY_SIZE(map))
-		return map[scancode];
+	static const int map2[] = {		/* code	key	*/
+		KEY_PHONE,			/* on-hook	*/
+	};
+	if (scancode & 0x100) {
+		/* range 0x100 - 0x10f */
+		scancode = scancode & 0x0f;
+		if(scancode < ARRAY_SIZE(map2))
+			return map2[scancode];
+	} else {
+		/* range 0x000 - 0x0ff */
+		if(scancode & 0x8)
+			return -EINVAL;
+		scancode = (scancode & 7) | ((scancode & 0xf0) >> 1);
+		if(scancode < ARRAY_SIZE(map))
+			return map[scancode];
+	}
 
 	return -EINVAL;
 }
@@ -535,8 +531,20 @@ static int map_b2k_to_key(unsigned scancode)
 		KEY_KPASTERISK,			/* 0b *		*/
 		KEY_LEFTSHIFT | KEY_3 << 8	/* 0c #		*/
 	};
-	if(scancode < ARRAY_SIZE(map))
-		return map[scancode];
+	static const int map2[] = {		/* code	key	*/
+		KEY_PHONE,			/* on-hook	*/
+		KEY_P,				/* PSTN ring	*/
+	};
+	if (scancode & 0x100) {
+		/* range 0x100 - 0x10f */
+		scancode = scancode & 0x0f;
+		if(scancode < ARRAY_SIZE(map2))
+			return map2[scancode];
+	} else {
+		/* range 0x000 - 0x0ff */
+		if (scancode < ARRAY_SIZE(map))
+			return map[scancode];
+	}
 
 	return -EINVAL;
 }
@@ -672,8 +680,7 @@ static int submit_cmd_sync(struct yealink_dev *yld,
 		USB_CTRL_SET_TIMEOUT);
 	if (ret == len)
 		ret = 0;
-	else
-	if (ret >= 0)
+	else if (ret >= 0)
 		ret = -ENODATA;
 	return ret;
 }
@@ -734,16 +741,16 @@ static int submit_scan_request(struct yealink_dev *yld, int mem_flags)
 
 	memset(ctl_data, 0, sizeof(*ctl_data));
 	ctl_data->g1.size = 1;
-	if (yld->model->name == p4k_model && 
-	    yld->last_cmd == CMD_KEYPRESS) {
-		ctl_data->cmd  = CMD_HOOKPRESS;
-		ctl_data->g1.sum  = 0xff - CMD_HOOKPRESS;
-		yld->last_cmd = CMD_HOOKPRESS;
-	} else {
-	 	ctl_data->cmd  = CMD_KEYPRESS;
-		ctl_data->g1.sum  = 0xff - CMD_KEYPRESS;
-		yld->last_cmd = CMD_KEYPRESS;
+	ctl_data->cmd  = CMD_KEYPRESS;
+	if (yld->last_cmd == CMD_KEYPRESS) {
+		if (yld->model->name == p4k_model)
+			ctl_data->cmd  = CMD_HOOKPRESS;
+		else if (yld->model->name == b2k_model)
+			ctl_data->cmd  = CMD_HANDSET;
 	}
+	ctl_data->g1.sum  = 0xff - ctl_data->cmd;
+	yld->last_cmd = ctl_data->cmd;
+
 	ret = usb_submit_urb(yld->urb_ctl, mem_flags);
 	if (ret != 0)
 		err("%s: usb_submit_urb failed %d", __func__, ret);
@@ -794,8 +801,9 @@ handle_difference:
 		case offsetof(struct yld_status, led):
 			ctl_data->cmd	= CMD_LED;
 			if (yld->model->name == b2k_model) {
-				data[0] = (val) ? 0xff : 0x00;
-				data[1] = (val) ? 0x00 : 0xff;
+				int pstn = yld->master.s.pstn;
+				data[0] = (val && !pstn) ? 0xff : 0x00;
+				data[1] = (pstn || yld->pstn_ring) ? 0xff : 0x00;
 				ctl_data->g1.size = 2;
 			} else {
 				data[0] = (val) ? 0 : 1;	/* invert */
@@ -836,9 +844,8 @@ handle_difference:
 			yld->notes_ix += len;
 			if (yld->notes_ix < yld->notes_len) {
 				yld->copy.b[ix] = ~val;	/* not done yet */
-				ix--;			/* TODO: verify if correct */
-			}
-			else
+				ix--;
+			} else
 				yld->notes_ix = 0;	/* reset for next time */
 			break;
 		case offsetof(struct yld_status, dialtone):
@@ -859,6 +866,10 @@ handle_difference:
 					data[0] = (val) ? 0xff : 0x00;
 				if (proto == yld_ctl_protocol_g1)
 					ctl_data->g1.size = 1;
+			} else if (yld->model->name == b2k_model) {
+				ctl_data->cmd	= CMD_B2K_RING;
+				ctl_data->g1.size = 1;
+				data[0] = val;
 			}
 			break;
 		case offsetof(struct yld_status, backlight):
@@ -884,6 +895,8 @@ handle_difference:
 			ctl_data->cmd	= CMD_PSTN_SWITCH;
 			ctl_data->g1.size = 1;
 			data[0] = val;
+			/* force update of LED */
+			yld->copy.s.led = ~yld->master.s.led;
 			break;
 		case offsetof(struct yld_status, keynum):
 			/* explicit query for key code only required for G1 phones */
@@ -942,7 +955,7 @@ handle_difference:
 	}
 	return 0;
 }
- 
+
 static int poke_update_from_userspace(struct yealink_dev *yld)
 {
 	enum yld_ctl_protocols proto;
@@ -971,6 +984,7 @@ static int poke_update_from_userspace(struct yealink_dev *yld)
 		yld->update_active = yld->update_active || do_update;
 		yld->scan_active = yld->scan_active || do_scan;
 		spin_unlock_irqrestore(&yld->flags_lock, spin_flags);
+
 		dbg("t=%d,u=%d,s=%d",yld->timer_expired,yld->update_active,yld->scan_active);
 		if (yld->dirty) dbg("set dirty");
 
@@ -1005,6 +1019,7 @@ static int poke_update_from_userspace(struct yealink_dev *yld)
 			yld->timer_expired = 0;
 			yld->update_active = 0;
 			spin_unlock_irqrestore(&yld->flags_lock, spin_flags);
+
 			dbg("t=0,u=0,s=%d",yld->scan_active);
 			if (do_scan)
 				ret = submit_scan_request(yld, GFP_KERNEL);
@@ -1052,6 +1067,7 @@ rescan_dirty:
 		yld->scan_active = do_scan;
 		yld->dirty = 0;
 		spin_unlock(&yld->flags_lock);
+
 		dbg("t=%d,u=%d,s=%d",yld->timer_expired,do_update,do_scan);
 
 		if (do_scan) {
@@ -1091,16 +1107,16 @@ rescan_dirty:
 			yld->timer_expired = timer_expired && pause;
 			yld->scan_active = do_scan;
 			yld->update_active = 0;
-			dirty = yld->dirty = yld->dirty && !do_scan;
+			yld->dirty = dirty = yld->dirty && !do_scan;
 			spin_unlock(&yld->flags_lock);
+
 			dbg("t=%d,u=0,s=%d",yld->timer_expired,yld->scan_active);
 			if (do_scan)
 				ret = submit_scan_request(yld, GFP_ATOMIC);
-			else
-			if (unlikely(dirty)) {
+			else if (unlikely(dirty)) {
 				/* This can only happen if another processor
-				 * modified the master buffer we did not catch
-				 * that modification anymore during the
+				 * modified the master buffer and we did not
+				 * catch that modification anymore during the
 				 * comparison -> compare a 2nd time, but not
 				 * more to not get caught up inside IRQ context!
 				 */
@@ -1143,15 +1159,19 @@ static void timer_callback(unsigned long ylda)
 		yld->scan_active = scan_active || do_submit;
 		yld->timer_expired = !do_submit;
 		spin_unlock_irq(&yld->flags_lock);
+
 		dbg("t=%d,u=%d,s=%d",yld->timer_expired,yld->update_active,yld->scan_active);
 		
 		if (unlikely(timer_expired))
 			warn("timeout was not serviced in time!");
+
+		delay = ((yld->model->name == b2k_model) ||
+			 (yld->model->name == p4k_model)) ?
+				YEALINK_POLLING_DELAY / 2 :
+				YEALINK_POLLING_DELAY;
+		delay = (HZ * delay + 999) / 1000;	/* calculate ticks */
+
 		if (likely(!yld->shutdown)) {
-			delay = (yld->model->name == p4k_model) ?
-					YEALINK_POLLING_DELAY / 2 :
-					YEALINK_POLLING_DELAY;
-			delay = (HZ * delay + 999) / 1000;	/* calculate ticks */
 			mod_timer(&yld->timer, jiffies + delay);
 			if (do_submit) {
 				(void) submit_scan_request(yld, GFP_ATOMIC);
@@ -1190,6 +1210,19 @@ static void urb_irq_callback(struct urb *urb)
 	case CMD_KEYPRESS:
 		yld->master.s.keynum = data0;
 		break;
+
+	case CMD_HANDSET:
+		ret = data0 & 0x01;		/* PSTN ring */
+		if (yld->pstn_ring != ret) {
+			dbg("pstnring: %x", ret);
+			if (yld->open) {
+				input_report_key(yld->idev, KEY_P, ret);
+				input_sync(yld->idev);
+			}
+			yld->pstn_ring = ret;
+		}
+		data0 = ~data0 << 3;		/* prepare to fall through */
+		/* fall through */
 
 	case CMD_HOOKPRESS:
 		ret = data0 & 0x10;
@@ -1751,6 +1784,8 @@ static int update_version_init(struct yealink_dev *yld)
 
 	info("Detected Model %s (Version 0x%04x)",
 		yld->model->name, version);
+	strcpy(yld->name, "Yealink USB-");
+	strcat(yld->name, yld->model->name);
 	sprintf(yld->uniq, "%04x", version);
 
 	/* prepare and submit next command */
@@ -1829,6 +1864,9 @@ static int init_state(struct yealink_dev *yld)
 	else
 	        set_ringnotes(yld, default_ringtone_g2,
 	                      sizeof(default_ringtone_g2));
+
+	/* switch to the PSTN line (B2K) */
+	yld->master.s.pstn = 1;
 
 	restore_state(yld);
 	return 0;
@@ -1984,7 +2022,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	struct yealink_dev *yld;
 	struct input_dev *input_dev;
 	enum yld_ctl_protocols proto;
-	int ret, pipe, i, j;
+	int ret, pipe, i;
 	int pkt_len;
 
 	//dbg("%s - start", __FUNCTION__);
@@ -2096,9 +2134,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	strlcat(yld->phys,  "/input0", sizeof(yld->phys));
 
 	/* register settings for the input device */
-//	input_dev->name = nfo->name; TODO better driver messages / registration
-//	input_dev->name = yld_device[i].name;
-	input_dev->name = "yealink";
+	input_dev->name = yld->name;
 	input_dev->uniq = yld->uniq;
 	input_dev->phys = yld->phys;
 	usb_to_input_id(udev, &input_dev->id);
@@ -2123,15 +2159,12 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 #else
 	input_dev->evbit[0] = BIT_MASK(EV_KEY);
 #endif
-	set_bit(KEY_PHONE, input_dev->keybit);   // ???@@@ always?
-	for (j = 0; j < ARRAY_SIZE(model); j++) {
-		for (i = 0; i < 256; i++) {
-			int k = model[j].keycode(i);
-			if (k >= 0) {
-				set_bit(k & 0xff, input_dev->keybit);
-				if (k >> 8)
-					set_bit(k >> 8, input_dev->keybit);
-			}
+	for (i = 0; i < 0x110; i++) {
+		int k = yld->model->keycode(i);
+		if (k >= 0) {
+			set_bit(k & 0xff, input_dev->keybit);
+			if (k >> 8)
+				set_bit(k >> 8, input_dev->keybit);
 		}
 	}
 
@@ -2181,12 +2214,6 @@ static void __exit yealink_dev_exit(void)
 
 module_init(yealink_dev_init);
 module_exit(yealink_dev_exit);
-
-/*
-module_param(default_model, charp, 0444);
-MODULE_PARM_DESC(default_model,
-	"select model (disables autodetection), see /sys/.../model for available types");
-*/
 
 MODULE_DEVICE_TABLE (usb, usb_table);
 
