@@ -650,7 +650,16 @@ static inline void pkt_update_checksum(union yld_ctl_packet *p, int len)
 	bp[len-1] = sum;
 }
 
-static inline int submit_cmd_sync(struct yealink_dev *yld,
+static inline int pkt_verify_checksum(union yld_ctl_packet *p, int len)
+{
+	u8 *bp = (u8 *) p;
+	u8 i, sum = 0;
+	for (i = 0; i < len; i++)
+		sum -= bp[i];
+	return (int) sum;
+}
+
+static int submit_cmd_sync(struct yealink_dev *yld,
 			   union yld_ctl_packet *p, int len)
 {
 	int ret;
@@ -669,22 +678,29 @@ static inline int submit_cmd_sync(struct yealink_dev *yld,
 	return ret;
 }
 
-static inline int submit_int_sync(struct yealink_dev *yld,
+static int submit_int_sync(struct yealink_dev *yld,
 			   union yld_ctl_packet *p, int len)
 {
 	int act_len, ret;
+
 	ret = usb_interrupt_msg(yld->udev,
 		usb_rcvintpipe(yld->udev, yld->int_endpoint->bEndpointAddress),
 		p, len, &act_len,
 		YEALINK_USB_INT_TIMEOUT);
-	if ((ret == 0) && (len != act_len)) {
-		err("Received short packet (%d/%d)", act_len, len);
-		ret = -ENODATA;
+	if (ret == 0) {
+		if (len != act_len) {
+			warn("Received short packet (%d/%d)", act_len, len);
+			ret = -ENODATA;
+		}
+		if (pkt_verify_checksum(p, len) != 0) {
+			warn("Received packet with invalid checksum");
+			ret = -EBADMSG;
+		}
 	}
 	return ret;
 }
 
-static inline int submit_cmd_int_sync(struct yealink_dev *yld,
+static int submit_cmd_int_sync(struct yealink_dev *yld,
 			union yld_ctl_packet *cp, int clen,
 			union yld_ctl_packet *ip, int ilen)
 {
@@ -1163,6 +1179,10 @@ static void urb_irq_callback(struct urb *urb)
 
 	if (status) {
 		err("%s - urb status %d", __FUNCTION__, status);
+		goto send_next;		/* do not process the irq_data */
+	}
+	if (pkt_verify_checksum(yld->irq_data, USB_PKT_LEN(proto)) != 0) {
+		warn("Received packet with invalid checksum, dropping it");
 		goto send_next;		/* do not process the irq_data */
 	}
 
