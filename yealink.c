@@ -147,9 +147,10 @@ static const struct lcd_segment_map {
 
 /* Structure to be initialized according to detected Yealink model */
 struct model_info {
-	int (*keycode)(unsigned scancode);
 	char *name;
+	int (*keycode)(unsigned scancode);
 	enum yld_ctl_protocols protocol;
+	int (*fcheck)(unsigned yld_status_offset);
 };
 
 struct yealink_dev {
@@ -219,6 +220,10 @@ static int map_p1k_to_key(unsigned);
 static int map_p4k_to_key(unsigned);
 static int map_b2k_to_key(unsigned);
 static int map_p1kh_to_key(unsigned);
+static int check_feature_p1k(unsigned);
+static int check_feature_p4k(unsigned);
+static int check_feature_b2k(unsigned);
+static int check_feature_p1kh(unsigned);
 
 /* model_info_idx_* have to match index in static model structure (below) */
 enum model_info_idx {
@@ -232,25 +237,30 @@ enum model_info_idx {
 
 static struct model_info model[] = {
 	{
-		.keycode  = map_p1k_to_key,
 		.name     = p1k_model,
-		.protocol = yld_ctl_protocol_g1
+		.keycode  = map_p1k_to_key,
+		.protocol = yld_ctl_protocol_g1,
+		.fcheck   = check_feature_p1k
 	},{
-		.keycode  = map_p4k_to_key,
 		.name     = p4k_model,
-		.protocol = yld_ctl_protocol_g1
+		.keycode  = map_p4k_to_key,
+		.protocol = yld_ctl_protocol_g1,
+		.fcheck   = check_feature_p4k
 	},{
-		.keycode  = map_b2k_to_key,
 		.name     = b2k_model,
-		.protocol = yld_ctl_protocol_g1
+		.keycode  = map_b2k_to_key,
+		.protocol = yld_ctl_protocol_g1,
+		.fcheck   = check_feature_b2k
 	},{
-		.keycode  = map_b2k_to_key,	/* same keymap as b2k */
 		.name     = b3g_model,
-		.protocol = yld_ctl_protocol_g1
+		.keycode  = map_b2k_to_key,	/* same keymap as b2k */
+		.protocol = yld_ctl_protocol_g1,
+		.fcheck   = check_feature_b2k
 	},{
-		.keycode  = map_p1kh_to_key,
 		.name     = p1kh_model,
-		.protocol = yld_ctl_protocol_g2
+		.keycode  = map_p1kh_to_key,
+		.protocol = yld_ctl_protocol_g2,
+		.fcheck   = check_feature_p1kh
 	}
 };
 
@@ -617,6 +627,54 @@ static void report_key(struct yealink_dev *yld, int key)
 }
 
 /*******************************************************************************
+ * Yealink model features
+ ******************************************************************************/
+
+static int check_feature_p1k(unsigned offset)
+{
+	struct yld_status *dummy;
+	return  (offset >= offsetof(struct yld_status, lcd) &&
+		 offset < offsetof(struct yld_status, lcd) + sizeof(dummy->lcd)) ||
+		offset == offsetof(struct yld_status, led) ||
+		offset == offsetof(struct yld_status, keynum) ||
+		offset == offsetof(struct yld_status, ringvol) ||
+		offset == offsetof(struct yld_status, ringnote_mod) ||
+		offset == offsetof(struct yld_status, ringtone);
+}
+
+static int check_feature_p1kh(unsigned offset)
+{
+	struct yld_status *dummy;
+	return  (offset >= offsetof(struct yld_status, lcd) &&
+		 offset < offsetof(struct yld_status, lcd) + sizeof(dummy->lcd)) ||
+		offset == offsetof(struct yld_status, led) ||
+		offset == offsetof(struct yld_status, ringvol) ||
+		offset == offsetof(struct yld_status, ringnote_mod) ||
+		offset == offsetof(struct yld_status, ringtone);
+}
+
+static int check_feature_p4k(unsigned offset)
+{
+	struct yld_status *dummy;
+	return  (offset >= offsetof(struct yld_status, lcd) &&
+		 offset < offsetof(struct yld_status, lcd) + sizeof(dummy->lcd)) ||
+		offset == offsetof(struct yld_status, led) ||
+		offset == offsetof(struct yld_status, backlight) ||
+		offset == offsetof(struct yld_status, speaker) ||
+		offset == offsetof(struct yld_status, keynum) ||
+		offset == offsetof(struct yld_status, dialtone);
+}
+
+static int check_feature_b2k(unsigned offset)
+{
+	return  offset == offsetof(struct yld_status, led) ||
+		offset == offsetof(struct yld_status, pstn) ||
+		offset == offsetof(struct yld_status, keynum) ||
+		offset == offsetof(struct yld_status, ringtone) ||
+		offset == offsetof(struct yld_status, dialtone);
+}
+
+/*******************************************************************************
  * Yealink usb communication interface
  ******************************************************************************/
 
@@ -792,8 +850,11 @@ static int prepare_update_cmd(struct yealink_dev *yld)
 		/* find update candidates: copy != master */
 		do {
 			val = yld->master.b[ix];
-			if (val != yld->copy.b[ix])
-				goto handle_difference;
+			if (val != yld->copy.b[ix]) {
+				yld->copy.b[ix] = val;
+				if (yld->model->fcheck(ix))
+					goto handle_difference;
+			}
 			if (unlikely(++ix >= sizeof(yld->master)))
 				ix = 0;
 		} while (ix != yld->stat_ix);
@@ -801,8 +862,6 @@ static int prepare_update_cmd(struct yealink_dev *yld)
 		break;
 
 handle_difference:
-
-		yld->copy.b[ix] = val;
 
 		/* Setup an appropriate update request */
 		switch(ix) {
@@ -821,18 +880,14 @@ handle_difference:
 			}
 			break;
 		case offsetof(struct yld_status, ringvol):
-			if (yld->model->name == p1k_model ||
-			    yld->model->name == p1kh_model) {
-				ctl_data->cmd	= CMD_RING_VOLUME;
-				if (proto == yld_ctl_protocol_g1)
-					ctl_data->g1.size = 1;
-				data[0] = val;
-			}
+			/* Models P1K, P1KH */
+			ctl_data->cmd	= CMD_RING_VOLUME;
+			if (proto == yld_ctl_protocol_g1)
+				ctl_data->g1.size = 1;
+			data[0] = val;
 			break;
 		case offsetof(struct yld_status, ringnote_mod):
-			if (yld->model->name != p1k_model &&
-			    yld->model->name != p1kh_model)
-				break;
+			/* Models P1K, P1KH */
 			if (!yld->ring_notes ||
 			    yld->notes_ix >= yld->notes_len)
 				break;
@@ -858,13 +913,10 @@ handle_difference:
 				yld->notes_ix = 0;	/* reset for next time */
 			break;
 		case offsetof(struct yld_status, dialtone):
-			if (yld->model->name == b2k_model ||
-			    yld->model->name == b3g_model ||
-			    yld->model->name == p4k_model) {
-				ctl_data->cmd	= CMD_DIALTONE;
-				ctl_data->g1.size = 1;
-				data[0] = val;
-			}
+			/* Models B2K, B3G, P4K */
+			ctl_data->cmd	= CMD_DIALTONE;
+			ctl_data->g1.size = 1;
+			data[0] = val;
 			break;
 		case offsetof(struct yld_status, ringtone):
 			if (yld->model->name == p1k_model ||
@@ -876,34 +928,27 @@ handle_difference:
 					data[0] = (val) ? 0xff : 0x00;
 				if (proto == yld_ctl_protocol_g1)
 					ctl_data->g1.size = 1;
-			} else if (yld->model->name == b2k_model ||
-			           yld->model->name == b3g_model) {
+			} else {
+				/* B2K, B3G */
 				ctl_data->cmd	= CMD_B2K_RING;
 				ctl_data->g1.size = 1;
 				data[0] = val;
 			}
 			break;
 		case offsetof(struct yld_status, backlight):
-			/* backlight supported by P4K only */
-			if (yld->model->name != p4k_model)
-				break;
+			/* Models P4K */
 			ctl_data->cmd	= CMD_LCD_BACKLIGHT;
 			ctl_data->g1.size = 1;
 			data[0] = val;
 			break;
 		case offsetof(struct yld_status, speaker):
-			/* speakerphone supported by P4K only */
-			if (yld->model->name != p4k_model)
-				break;
+			/* Models P4K */
 			ctl_data->cmd	= CMD_SPEAKER;
 			ctl_data->g1.size = 1;
 			data[0] = val;
 			break;
 		case offsetof(struct yld_status, pstn):
-			/* USB/PSTN switch supported by B2K & B3G only */
-			if (yld->model->name != b2k_model &&
-			    yld->model->name != b3g_model)
-				break;
+			/* Models B2K, B3G */
 			ctl_data->cmd	= CMD_PSTN_SWITCH;
 			ctl_data->g1.size = 1;
 			data[0] = val;
@@ -912,8 +957,6 @@ handle_difference:
 			break;
 		case offsetof(struct yld_status, keynum):
 			/* explicit query for key code only required for G1 phones */
-			if (proto != yld_ctl_protocol_g1)
-				break;
 			val--;
 			val &= 0x1f;
 			ctl_data->cmd		= CMD_SCANCODE;
@@ -921,11 +964,7 @@ handle_difference:
 			ctl_data->g1.offset	= cpu_to_be16(val);
 			break;
 		default:
-			/* no LCD available for B2K & B3G */
-			if (yld->model->name == b2k_model ||
-			    yld->model->name == b3g_model)
-				break;
-
+			/* Models P1K(H), P4K */
 		    	offset = ix - offsetof(struct yld_status, lcd);
 			len = sizeof(yld->master.s.lcd) - offset;
 
@@ -1306,6 +1345,7 @@ static void urb_ctl_callback(struct urb *urb)
 
 	switch (yld->ctl_data->cmd) {
 	case CMD_HOOKPRESS:
+	case CMD_HANDSET:
 	case CMD_KEYPRESS:
 	case CMD_SCANCODE:
 		if (proto == yld_ctl_protocol_g1) {
@@ -1484,6 +1524,10 @@ static ssize_t store_line(struct device *dev, const char *buf, size_t count,
 		up_write(&sysfs_rwsema);
 		return -ENODEV;
 	}
+	if (!yld->model->fcheck(offsetof(struct yld_status, lcd))) {
+		up_write(&sysfs_rwsema);
+		return ret;
+	}
 
 	if (len > count)
 		len = count;
@@ -1543,7 +1587,8 @@ static ssize_t get_icons(struct device *dev, struct device_attribute *attr,
 	}
 
 	for (i = 0; i < ARRAY_SIZE(lcdMap); i++) {
-		if (lcdMap[i].type != '.')
+		if ((lcdMap[i].type != '.') ||
+		    !yld->model->fcheck(lcdMap[i].u.p.a))
 			continue;
 		ret += sprintf(&buf[ret], "%s %s\n",
 				yld->lcdMap[i] == ' ' ? "  " : "on",
@@ -1560,7 +1605,7 @@ static ssize_t set_icon(struct device *dev, const char *buf, size_t count,
 	struct yealink_dev *yld;
 	enum yld_ctl_protocols proto;
 	int early_wait = 0;
-	int i;
+	int i, poke;
 	int ret = count;
 
 	down_write(&sysfs_rwsema);
@@ -1583,17 +1628,21 @@ static ssize_t set_icon(struct device *dev, const char *buf, size_t count,
 		}
 	}
 
+	poke = 0;
 	for (i = 0; i < ARRAY_SIZE(lcdMap); i++) {
-		if (lcdMap[i].type != '.')
+		if ((lcdMap[i].type != '.') ||
+		    !yld->model->fcheck(lcdMap[i].u.p.a))
 			continue;
 		if (strncmp(buf, lcdMap[i].u.p.name, count) == 0) {
 			setChar(yld, i, chr);
+			poke = 1;
 			break;
 		}
 	}
 
-	if (poke_update_from_userspace(yld) != 0)
-		ret = -ERESTARTSYS;
+	if (poke)
+		if (poke_update_from_userspace(yld) != 0)
+			ret = -ERESTARTSYS;
 
 	up_write(&sysfs_rwsema);
 
@@ -1639,7 +1688,11 @@ static ssize_t store_ringtone(struct device *dev,
 		up_write(&sysfs_rwsema);
 		return -ENODEV;
 	}
-	
+	if (!yld->model->fcheck(offsetof(struct yld_status, ringnote_mod))) {
+		up_write(&sysfs_rwsema);
+		return ret;
+	}
+
 	/* first stop the whole USB cycle */
 	yld->usb_pause = 1;
 	i = 10;
