@@ -8,7 +8,7 @@ USB-P1KH USB 1.1 hand phone with LCD, keypad and ringer.
 USB-P4K  USB 1.1 speaker phone desktop model.
 USB-B2K  USB 1.1 telbox, ATA adapter for PSTN.
 
-For manufacturer documentation see http://www.yealink.com
+For manufacturer documentation see http://www.yealink.com/
 
 The original development branch can be found at:
 http://cvs.savannah.gnu.org/viewcvs/usbb2k-api/yealink-module/
@@ -18,20 +18,22 @@ http://www.devbase.at/svn/view.cgi/yealink-module/?root=voip
 
 
 Matrix of supported features:
-function	API	P1K(H)	P4K	B2K
--------------------------------------------
-audio playback	alsa 	ok	ok	ok
-audio record	alsa	ok	ok	ok
-keyboard	input	ok	ok	ok
-hookflash	input		ok	WIP
+function	API	P1K(H)	P4K	B2K	B3G
+---------------------------------------------------
+audio playback	alsa 	ok	ok	ok	ok
+audio record	alsa	ok	ok	ok	ok
+keyboard	input	ok	ok	ok	ok
+hookflash	input		ok	ok	ok
+PSTN ring	input			ok	ok
 LCD		sysfs	ok	ok
 LED		sysfs	ok
-DIALTONE	sysfs	ok	ok	ok
-RINGTONE	sysfs	ok		WIP
+DIALTONE	sysfs		ok	ok	ok
+RINGTONE	sysfs	ok		ok	ok
 BACKLIGHT	sysfs		ok
 SPEAKER		sysfs		ok
-PSTN		sysfs			ok
-LED_USB		sysfs			ok
+PSTN		sysfs			ok	ok
+LED (USB/PSTN)	sysfs			ok	ok
+
 
 Notes:
 P4K: Ring tones are implemented by switching on the SPEAKER
@@ -41,9 +43,9 @@ and sending a ring tone pcm via the dsp interface.
 0.1 User space applications
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-0.1.1 YeaPhone
+0.1.1 Yeaphone
 ~~~~~~~~~~~~~~
-Thomas Reitmayr has released YeaPhone, a great addition to linphone, this
+Thomas Reitmayr has released Yeaphone, a great addition to linphone, this
 will turn your P1K into a full blown SIP phone. There are even packages
 for the Linksys NSLU2 for an energy efficient and fanless solution!
 

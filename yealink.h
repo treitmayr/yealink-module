@@ -73,7 +73,7 @@ enum yld_ctl_protocols {
 #define YLD_IS_P4K(v)	((v) >= 0x0230 && (v) <= 0x02ff)
 #define YLD_IS_B2K(v)	(((v) >= 0x0520 && (v) <= 0x053f) || \
 			 ((v) >= 0x0570 && (v) <= 0x058f))
-#define YLD_IS_B3K(v)	((v) >= 0x0540 && (v) <= 0x056f)
+#define YLD_IS_B3G(v)	((v) >= 0x0540 && (v) <= 0x056f)
 
 /* The following yld_ctl_packet's are available: */
 
@@ -97,7 +97,7 @@ enum yld_ctl_protocols {
 
 /* Request scan of attached PSTN
  *
- * models       B2K (not B3K!)
+ * models       B2K (not B3G!)
  * cmd          0x8d
  * size         1
  * offset       0
@@ -154,12 +154,13 @@ enum yld_ctl_protocols {
 
 /* Set led
  *
- * models       P1K, P1KH, B2K, B3K
+ * models       P1K, P1KH, B2K, B3G
  * cmd		0x05
  * size		1
  * offset	0
  * data[0]	1 OFF / 0 ON (P1K, P1KH)
- * data[0,1]	"00 ff" OFF / "ff 00" ON (B2K, B3K)
+ * data[0]	USB LED (00 OFF / ff ON)	(B2K, B3G)
+ * data[1]	PSTN LED (00 OFF / ff ON)	(B2K, B3G)
  */
 #define CMD_LED			0x05
 
@@ -215,7 +216,7 @@ enum yld_ctl_protocols {
 
 /* Sound dial tone via the ear speaker
  *
- * models       B2K, B3K, P3K, P4K, V1K
+ * models       B2K, B3G, P3K, P4K, V1K
  * cmd		0x09
  * size		1
  * offset	0
@@ -235,7 +236,7 @@ enum yld_ctl_protocols {
 
 /* B2K Ring control
  *
- * models	B2K, B3K
+ * models	B2K, B3G
  * cmd		0x01
  * size		1
  * offset	0
@@ -246,19 +247,19 @@ enum yld_ctl_protocols {
 
 /* B2K PSTN/USB switch
  *
- * models	B2K, B3K
+ * models	B2K, B3G
  * cmd		0x0e
  * size		1
  * offset	0
  * data[0]	0 USB / 1 PSTN
  * Note: It is recommended to turn this on (PSTN) when the program shuts down.
- *       For the B3K if call forwarding is enabled, this has to be 0.
+ *       For the B3G if call forwarding is enabled, this has to be 0.
  */
 #define CMD_PSTN_SWITCH		0x0e
 
 /* Overload state
  *
- * models	?
+ * models	any
  * state	0xfd
  * Note: This state seems to be replied whenever the received packet had an
  *       invalid checksum or some other internal error occurred in the phone.
