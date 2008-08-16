@@ -40,8 +40,8 @@ struct yld_ctl_packet_g1 {
 
 /* "Generation 2" models use 8 byte packets */
 
-#define USB_PKT_LEN_G2	sizeof(struct yld_ctl_packet_g2)
 #define USB_PKT_DATA_LEN_G2	6
+#define USB_PKT_LEN_G2	sizeof(struct yld_ctl_packet_g2)
 
 struct yld_ctl_packet_g2 {
 	u8	cmd;		/* command code, see below */
