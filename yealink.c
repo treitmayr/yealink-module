@@ -858,6 +858,10 @@ static int prepare_update_cmd(struct yealink_dev *yld)
 
 handle_difference:
 
+		/* preset some likely values */
+		ctl_data->g1.offset = 0;
+		ctl_data->g1.size = 1;
+
 		/* Setup an appropriate update request */
 		switch(ix) {
 		case offsetof(struct yld_status, led):
@@ -870,15 +874,11 @@ handle_difference:
 				ctl_data->g1.size = 2;
 			} else {
 				data[0] = (val) ? 0 : 1;	/* invert */
-				if (proto == yld_ctl_protocol_g1)
-					ctl_data->g1.size = 1;
 			}
 			break;
 		case offsetof(struct yld_status, ringvol):
 			/* Models P1K, P1KH */
 			ctl_data->cmd	= CMD_RING_VOLUME;
-			if (proto == yld_ctl_protocol_g1)
-				ctl_data->g1.size = 1;
 			data[0] = val;
 			break;
 		case offsetof(struct yld_status, ringnote_mod):
@@ -907,7 +907,6 @@ handle_difference:
 		case offsetof(struct yld_status, dialtone):
 			/* Models B2K, B3G, P4K */
 			ctl_data->cmd	= CMD_DIALTONE;
-			ctl_data->g1.size = 1;
 			data[0] = val;
 			break;
 		case offsetof(struct yld_status, ringtone):
@@ -918,31 +917,25 @@ handle_difference:
 					data[0] = (val) ? 0x24 : 0x00;
 				else
 					data[0] = (val) ? 0xff : 0x00;
-				if (proto == yld_ctl_protocol_g1)
-					ctl_data->g1.size = 1;
 			} else {
 				/* B2K, B3G */
 				ctl_data->cmd	= CMD_B2K_RING;
-				ctl_data->g1.size = 1;
 				data[0] = val;
 			}
 			break;
 		case offsetof(struct yld_status, backlight):
 			/* Models P4K */
 			ctl_data->cmd	= CMD_LCD_BACKLIGHT;
-			ctl_data->g1.size = 1;
 			data[0] = val;
 			break;
 		case offsetof(struct yld_status, speaker):
 			/* Models P4K */
 			ctl_data->cmd	= CMD_SPEAKER;
-			ctl_data->g1.size = 1;
 			data[0] = val;
 			break;
 		case offsetof(struct yld_status, pstn):
 			/* Models B2K, B3G */
 			ctl_data->cmd	= CMD_PSTN_SWITCH;
-			ctl_data->g1.size = 1;
 			data[0] = val;
 			/* force update of LED */
 			yld->copy.s.led = ~yld->master.s.led;
