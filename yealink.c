@@ -1715,11 +1715,10 @@ static int update_version_init(struct yealink_dev *yld)
 
 	might_sleep();
 	
-	if (!yld->model) {	/* return silently */
+	if (!yld->model) {
 		warn("%s - no model preselected!", __FUNCTION__);
 		return -ENODEV;
 	}
-	/*dbg("%s", __FUNCTION__);*/
 
 	proto = yld->model->protocol;
 	len = USB_PKT_LEN(proto);
@@ -1735,8 +1734,10 @@ static int update_version_init(struct yealink_dev *yld)
 
 	/* prepare the VERSION command */
 	ctl_data->cmd = CMD_VERSION;
-	if (proto == yld_ctl_protocol_g1)
+	if (proto == yld_ctl_protocol_g1) {
 		ctl_data->g1.size = 2;
+		ctl_data->g1.offset = 0;
+	}
 	pkt_update_checksum(ctl_data, len);
 	
 	ret = submit_cmd_int_sync(yld, ctl_data, len, int_data, len);
@@ -1772,10 +1773,12 @@ static int update_version_init(struct yealink_dev *yld)
 	strcat(yld->name, yld->model->name);
 	sprintf(yld->uniq, "%04x", version);
 
-	/* prepare and submit next command */
+	/* prepare the INIT command */
 	ctl_data->cmd = CMD_INIT;
-	if (proto == yld_ctl_protocol_g1)
+	if (proto == yld_ctl_protocol_g1) {
 		ctl_data->g1.size = sizeof(ctl_data->g1.data);
+		ctl_data->g1.offset = 0;
+	}
 	pkt_update_checksum(ctl_data, len);
 	
 	ret = submit_cmd_int_sync(yld, ctl_data, len, int_data, len);
