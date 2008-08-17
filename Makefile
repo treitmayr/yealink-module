@@ -17,13 +17,19 @@ test: modules
 	rmmod yealink ; echo -n
 	insmod yealink.ko
 	sleep 1
+	cat $(PATH_SYSFS)/model
 	echo -n RINGTONE > $(PATH_SYSFS)/show_icon
 	date +"%m.%e.%k:%M"  | sed 's/^0/ /' > $(PATH_SYSFS)/line1
-	date +%a | perl -e 'printf "%.2s", uc(<>);' > $(PATH_SYSFS)/show_icon
+	LANG=C date +%a | perl -e 'printf "%.2s", uc(<>);' > $(PATH_SYSFS)/show_icon
 	cat $(PATH_SYSFS)/get_icons
 	cat $(PATH_SYSFS)/line?
 	sleep 6
 	echo -n RINGTONE > $(PATH_SYSFS)/hide_icon
+	cnt=0 ; while [ $$cnt != 5000 ] ; do \
+		dd if=/dev/urandom bs=1 count=6 2>/dev/null | \
+		hexdump -e '"%02x"' > $(PATH_SYSFS)/line3 ;\
+		let cnt=cnt+1;\
+		done
 
 tar:
 	tar jcvf yealink.tar.bz2 README TODO Makefile *.[ch]
