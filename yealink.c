@@ -1046,67 +1046,51 @@ static int poke_update_from_userspace(struct yealink_dev *yld)
 	return ret;
 }
 
-/* Try to submit an update command to the device.
+/* Try to submit an update command to the device (G1 devices).
  * 
  * This function is invoked by callback functions to possibly submit an
  * update command to the device:
- * - G1: by urb_ctl_callback if the next update can be performed
- *       by urb_irq_callback (unconditionally)
- * - G2: by timer_callback (unconditionally)
+ * - by urb_ctl_callback if the next update can be performed
+ * - by urb_irq_callback (unconditionally)
  *
- * This function may be called from hard- and soft-irq context.
+ * This function may be called from hard-irq context.
  */
-static int perform_single_update(struct yealink_dev *yld)
+static int perform_single_update_g1(struct yealink_dev *yld)
 {
-	enum yld_ctl_protocols proto;
-	int dont_break, timer_expired, pause;
-	unsigned long spin_flags;
-	int ix;
-	int do_update = 0;
+	int dont_break, pause;
+	int timer_expired = 0;
+	int do_update;
 	int do_scan = 0;
 	int ret = 0;
+	int ix;
 
-	proto = yld->model->protocol;
 	YEALINK_DBG_FLAGS("S:");
 
 	/* writing ringtone notes must not be interrupted (G1 & G2) */
 	/* same for key scan (G1 only) */
-	if (proto == yld_ctl_protocol_g1) {
-		ix = yld->stat_ix;
-		dont_break = ((ix == offsetof(struct yld_status, ringnote_mod)) &&
-			      (yld->notes_ix != 0)) ||
-			     ((ix == offsetof(struct yld_status, keynum)) &&
-			      (yld->master.b[ix] != yld->copy.b[ix]));
-	}
+	ix = yld->stat_ix;
+	dont_break = ((ix == offsetof(struct yld_status, ringnote_mod)) &&
+		      (yld->notes_ix != 0)) ||
+		     ((ix == offsetof(struct yld_status, keynum)) &&
+		      (yld->master.b[ix] != yld->copy.b[ix]));
 
-	spin_lock_irqsave(&yld->flags_lock, spin_flags);
-	timer_expired = yld->timer_expired;
+	spin_lock(&yld->flags_lock);
 	pause = yld->usb_pause;
-
-	if (proto == yld_ctl_protocol_g1) {
-		do_update = (!timer_expired && !pause) || dont_break;
-		do_scan = !do_update && timer_expired && !pause;
-	} else {	/* yld_ctl_protocol_g2 */
-		do_update = timer_expired && !pause;
-	}
-
+	timer_expired = yld->timer_expired;
+	do_update = (!timer_expired && !pause) || dont_break;
+	do_scan = !do_update && timer_expired && !pause;
 	if (do_update) {
 		/* find update candidates: copy != master */
 		do_update = prepare_update_cmd(yld);
 	}
-
 	yld->update_active = do_update;
-	if (proto == yld_ctl_protocol_g1) {
-		yld->timer_expired = timer_expired && !do_scan;
-		yld->scan_active = do_scan;
-	} else {
-		yld->timer_expired = timer_expired && !do_update;
-	}
-	spin_unlock_irqrestore(&yld->flags_lock, spin_flags);
+	yld->timer_expired = timer_expired && !do_scan;
+	yld->scan_active = do_scan;
+	spin_unlock(&yld->flags_lock);
 
 	YEALINK_DBG_FLAGS("  ");
 	if (do_update) {
-		pkt_update_checksum(yld->ctl_data, USB_PKT_LEN(proto));
+		pkt_update_checksum(yld->ctl_data, USB_PKT_LEN_G1);
 		if (likely(!yld->shutdown))
 			ret = usb_submit_urb(yld->urb_ctl, GFP_ATOMIC);
 	} else if (do_scan) {
@@ -1119,46 +1103,91 @@ static int perform_single_update(struct yealink_dev *yld)
 	return ret;
 }
 
-/* Timer callback function
+/* Try to submit an update command to the device (G2 devices).
+ * 
+ * This function is invoked by the timer callback function to possibly
+ * submit the next update command to the device.
+ *
+ * This function may be called from soft-irq context.
+ */
+static int perform_single_update_g2(struct yealink_dev *yld)
+{
+	int do_update;
+	int ret = 0;
+
+	YEALINK_DBG_FLAGS("S:");
+
+	spin_lock_irq(&yld->flags_lock);
+	do_update = !yld->usb_pause;
+	if (do_update) {
+		/* find update candidates: copy != master */
+		do_update = prepare_update_cmd(yld);
+	}
+	yld->update_active = do_update;
+	yld->timer_expired = !do_update;
+	spin_unlock_irq(&yld->flags_lock);
+
+	YEALINK_DBG_FLAGS("  ");
+	if (do_update) {
+		pkt_update_checksum(yld->ctl_data, USB_PKT_LEN_G2);
+		if (likely(!yld->shutdown))
+			ret = usb_submit_urb(yld->urb_ctl, GFP_ATOMIC);
+	} else {
+		dbg("   pausing updates");
+	}
+
+	return ret;
+}
+
+/* Timer callback function (G1 devices)
  * 
  * This function submits a pending key scan command.
  */
-static void timer_callback(unsigned long ylda)
+static void timer_callback_g1(unsigned long ylda)
 {
 	struct yealink_dev *yld;
-	enum yld_ctl_protocols proto;
+	int timer_expired, idle;
+	int do_submit;
 	int ret = 0;
 	
 	yld = (struct yealink_dev *)ylda;
-	proto = yld->model->protocol;
 
-	if (proto == yld_ctl_protocol_g1) {
-		int timer_expired, idle;
-		int do_submit;
+	YEALINK_DBG_FLAGS("T:");
 
-		YEALINK_DBG_FLAGS("T:");
+	spin_lock_irq(&yld->flags_lock);
+	timer_expired = yld->timer_expired;
+	idle = !yld->update_active && !yld->scan_active;
+	do_submit = idle && !yld->usb_pause;
+	yld->scan_active = yld->scan_active || do_submit;
+	yld->timer_expired = !do_submit;
+	spin_unlock_irq(&yld->flags_lock);
 
-		spin_lock_irq(&yld->flags_lock);
-		timer_expired = yld->timer_expired;
-		idle = !yld->update_active && !yld->scan_active;
-		do_submit = idle && !yld->usb_pause;
-		yld->scan_active = yld->scan_active || do_submit;
-		yld->timer_expired = !do_submit;
-		spin_unlock_irq(&yld->flags_lock);
+	if (unlikely(timer_expired))
+		warn("timeout was not serviced in time!");
+	YEALINK_DBG_FLAGS("  ");
 
-		if (unlikely(timer_expired))
-			warn("timeout was not serviced in time!");
-		YEALINK_DBG_FLAGS("  ");
-
-		if (likely(!yld->shutdown)) {
-			mod_timer(&yld->timer, jiffies + yld->timer_delay);
-			if (do_submit) {
-				ret = submit_scan_request(yld, GFP_ATOMIC);
-			}
+	if (likely(!yld->shutdown)) {
+		mod_timer(&yld->timer, jiffies + yld->timer_delay);
+		if (do_submit) {
+			ret = submit_scan_request(yld, GFP_ATOMIC);
 		}
-	} else { /* yld_ctl_protocol_g2 */
-		ret = perform_single_update(yld);
 	}
+	if (ret)
+		err("%s - urb submission failed %d", __FUNCTION__, ret);
+}
+
+/* Timer callback function (G2 devices)
+ * 
+ * This function submits a pending key scan command.
+ */
+static void timer_callback_g2(unsigned long ylda)
+{
+	struct yealink_dev *yld;
+	int ret;
+
+	yld = (struct yealink_dev *)ylda;
+
+	ret = perform_single_update_g2(yld);
 	if (ret)
 		err("%s - urb submission failed %d", __FUNCTION__, ret);
 }
@@ -1242,7 +1271,7 @@ static void urb_irq_callback(struct urb *urb)
 
 send_next:
 	if (proto == yld_ctl_protocol_g1) {
-		ret = perform_single_update(yld);
+		ret = perform_single_update_g1(yld);
 	} else {
 		/* always wait for a key or some other interrupt */
 		if (likely(!yld->shutdown))
@@ -1284,7 +1313,7 @@ static void urb_ctl_callback(struct urb *urb)
 		break;
 	default:
 		/* immediately send new command */
-		ret = perform_single_update(yld);
+		ret = perform_single_update_g1(yld);
 	}
 
 	if (ret)
@@ -1861,10 +1890,13 @@ static int start_traffic(struct yealink_dev *yld)
 	yld->usb_pause = 0;
 	if (likely(!yld->shutdown)) {
 		if (yld->model->protocol == yld_ctl_protocol_g1) {
+			/* start the periodic scan timer */
 			mod_timer(&yld->timer, jiffies + yld->timer_delay);
 		} else { /* yld_ctl_protocol_g2 */
 			/* immediately start waiting for a key */
 			ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
+			/* pretend that the timer is already expired */
+			yld->timer_expired = 1;
 		}
 		if (ret == 0)
 			ret = poke_update_from_userspace(yld);
@@ -2101,7 +2133,10 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	yld->urb_ctl->dev = udev;
 
 	/* set up the periodic scan/update timer */
-	setup_timer(&yld->timer, timer_callback, (unsigned long) yld);
+	setup_timer(&yld->timer,
+		    (proto == yld_ctl_protocol_g1) ? timer_callback_g1 :
+						     timer_callback_g2,
+		    (unsigned long) yld);
 
 	/* find out the physical bus location */
 	usb_make_path(udev, yld->phys, sizeof(yld->phys));
