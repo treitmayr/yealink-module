@@ -83,8 +83,8 @@
 #error "Need kernel version 2.6.21 or higher"
 #endif
 
-#define DRIVER_VERSION	"20080730"
-#define DRIVER_AUTHOR	"Henk Vergonet, Thomas Reitmayr"
+#define DRIVER_VERSION	"20080819"
+#define DRIVER_AUTHOR	"Thomas Reitmayr, Henk Vergonet"
 #define DRIVER_DESC	"Yealink phone driver"
 
 #define USB_YEALINK_VENDOR_ID	0x6993
@@ -358,6 +358,9 @@ static int set_ringnotes(struct yealink_dev *yld, u8 *buf, size_t size)
 	yld->master.s.ringvol = buf[0];
 	if (size == 1)		/* do not touch the ring notes */
 		return 0;
+
+	if ((yld->model->protocol == yld_ctl_protocol_g2) && (size > 4))
+		size = 4;	/* P1KH can only deal with one command packet */
 
 	buf++;
 	size--;
@@ -1747,7 +1750,7 @@ static int update_version_init(struct yealink_dev *yld)
 	}
 	if (!yld->model) {
 		int pid = le16_to_cpu(yld->udev->descriptor.idProduct);
-		warn(KERN_INFO "Yealink model not supported: "
+		info("Yealink model not supported: "
 			"PID %04x, version 0x%04x.", pid, version);
 		ret = -ENODEV;
 		goto leave_clean;
@@ -2001,8 +2004,6 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	enum yld_ctl_protocols proto;
 	int ret, pipe, i;
 	int pkt_len;
-
-	//dbg("%s - start", __FUNCTION__);
 
 	interface = intf->cur_altsetting;
 	endpoint = &interface->endpoint[0].desc;

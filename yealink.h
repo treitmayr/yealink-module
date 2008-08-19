@@ -208,9 +208,7 @@ enum yld_ctl_protocols {
  * offset	0
  * data[0]	0 OFF / 0x24 ON (P1K)
  *              0 OFF / 0xff ON (P1KH)
- * Note: At least for the P1KH this seems to be a loop counter which is
- *       decremented with each sequence of ring notes. Therefore ringing will
- *       stop after the ring notes were played data[0] times.
+ * Note: For the P1KH it was observed that ringing stops after ~20s by itself.
  */
 #define CMD_RINGTONE		0x03
 
