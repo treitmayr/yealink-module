@@ -415,6 +415,7 @@ static int set_ringnotes(struct yealink_dev *yld, u8 *buf, size_t size)
 static int map_p1k_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_1,			 	/* 00 1		*/
 		KEY_2,				/* 01 2		*/
 		KEY_3,				/* 02 3		*/
@@ -442,6 +443,35 @@ static int map_p1k_to_key(unsigned scancode)
 		KEY_KPASTERISK,			/* 30 *		*/
 		KEY_0,				/* 31 0		*/
 		KEY_LEFTSHIFT | KEY_3 << 8,	/* 32 #		*/
+#else
+		KEY_NUMERIC_1,		 	/* 00 1		*/
+		KEY_NUMERIC_2,			/* 01 2		*/
+		KEY_NUMERIC_3,			/* 02 3		*/
+		KEY_ENTER,			/* 03 pickup	*/
+		KEY_RIGHT,			/* 04 OUT	*/
+		-EINVAL,			/* 05		*/
+		-EINVAL,			/* 06		*/
+		-EINVAL,			/* 07		*/
+		KEY_NUMERIC_4,			/* 10 4		*/
+		KEY_NUMERIC_5,			/* 11 5		*/
+		KEY_NUMERIC_6,			/* 12 6		*/
+		KEY_ESC,			/* 13 hangup	*/
+		KEY_BACKSPACE,			/* 14 C		*/
+		-EINVAL,			/* 15		*/
+		-EINVAL,			/* 16		*/
+		-EINVAL,			/* 17		*/
+		KEY_NUMERIC_7,			/* 20 7		*/
+		KEY_NUMERIC_8,			/* 21 8		*/
+		KEY_NUMERIC_9,			/* 22 9		*/
+		KEY_LEFT,			/* 23 IN	*/
+		KEY_DOWN,			/* 24 down	*/
+		-EINVAL,			/* 25		*/
+		-EINVAL,			/* 26		*/
+		-EINVAL,			/* 27		*/
+		KEY_NUMERIC_STAR,		/* 30 *		*/
+		KEY_NUMERIC_0,			/* 31 0		*/
+		KEY_NUMERIC_POUND,		/* 32 #		*/
+#endif
 		KEY_UP				/* 33 up	*/
 	};
 
@@ -473,6 +503,7 @@ static int map_p4k_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
 		KEY_ENTER,		 	/* 00 DIAL	*/
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_3,				/* 01 3		*/
 		KEY_6,				/* 02 6		*/
 		KEY_9,				/* 03 9		*/
@@ -493,6 +524,28 @@ static int map_p4k_to_key(unsigned scancode)
 		KEY_4,				/* 22 4		*/
 		KEY_7,				/* 23 7		*/
 		KEY_KPASTERISK,			/* 24 *		*/
+#else
+		KEY_NUMERIC_3,			/* 01 3		*/
+		KEY_NUMERIC_6,			/* 02 6		*/
+		KEY_NUMERIC_9,			/* 03 9		*/
+		KEY_NUMERIC_POUND,		/* 04 #		*/
+		KEY_HELP,			/* 05 HELP	*/
+		-EINVAL,			/* 06		*/
+		-EINVAL,			/* 07		*/
+		KEY_RIGHT,			/* 10 OUT	*/
+		KEY_NUMERIC_2,			/* 11 2		*/
+		KEY_NUMERIC_5,			/* 12 5		*/
+		KEY_NUMERIC_8,			/* 13 8		*/
+		KEY_NUMERIC_0,			/* 14 0		*/
+		KEY_ESC,			/* 15 FLASH	*/
+		-EINVAL,			/* 16		*/
+		-EINVAL,			/* 17		*/
+		KEY_H,				/* 20 handsfree	*/
+		KEY_NUMERIC_1,			/* 21 1		*/
+		KEY_NUMERIC_4,			/* 22 4		*/
+		KEY_NUMERIC_7,			/* 23 7		*/
+		KEY_NUMERIC_STAR,		/* 24 *		*/
+#endif
 		KEY_S,				/* 25 SEND	*/
 		-EINVAL,			/* 26		*/
 		-EINVAL,			/* 27		*/
@@ -532,6 +585,7 @@ static int map_p4k_to_key(unsigned scancode)
 static int map_b2k_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_0,			 	/* 00 0		*/
 		KEY_1,			 	/* 01 1		*/
 		KEY_2,				/* 02 2		*/
@@ -545,6 +599,21 @@ static int map_b2k_to_key(unsigned scancode)
 		-EINVAL,                        /* 0a		*/
 		KEY_KPASTERISK,			/* 0b *		*/
 		KEY_LEFTSHIFT | KEY_3 << 8	/* 0c #		*/
+#else
+		KEY_NUMERIC_0,		 	/* 00 0		*/
+		KEY_NUMERIC_1,		 	/* 01 1		*/
+		KEY_NUMERIC_2,			/* 02 2		*/
+		KEY_NUMERIC_3,			/* 03 3		*/
+		KEY_NUMERIC_4,			/* 04 4		*/
+		KEY_NUMERIC_5,			/* 05 5		*/
+		KEY_NUMERIC_6,			/* 06 6		*/
+		KEY_NUMERIC_7,			/* 07 7		*/
+		KEY_NUMERIC_8,			/* 08 8		*/
+		KEY_NUMERIC_9,			/* 09 9		*/
+		-EINVAL,                        /* 0a		*/
+		KEY_NUMERIC_STAR,		/* 0b *		*/
+		KEY_NUMERIC_POUND		/* 0c #		*/
+#endif
 	};
 	static const int map2[] = {		/* code	key	*/
 		KEY_PHONE,			/* on-hook	*/
@@ -569,6 +638,7 @@ static int map_b2k_to_key(unsigned scancode)
 static int map_p1kh_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_1,			 	/* 00 1		*/
 		KEY_2,				/* 01 2		*/
 		KEY_3,				/* 02 3		*/
@@ -587,6 +657,26 @@ static int map_p1kh_to_key(unsigned scancode)
 		KEY_KPASTERISK,			/* 0f *		*/
 		KEY_0,				/* 10 0		*/
 		KEY_LEFTSHIFT | KEY_3 << 8,	/* 11 #		*/
+#else
+		KEY_NUMERIC_1,		 	/* 00 1		*/
+		KEY_NUMERIC_2,			/* 01 2		*/
+		KEY_NUMERIC_3,			/* 02 3		*/
+		KEY_ENTER,			/* 03 pickup	*/
+		KEY_RIGHT,			/* 04 OUT	*/
+		KEY_NUMERIC_4,			/* 05 4		*/
+		KEY_NUMERIC_5,			/* 06 5		*/
+		KEY_NUMERIC_6,			/* 07 6		*/
+		KEY_ESC,			/* 08 hangup	*/
+		KEY_BACKSPACE,			/* 09 C		*/
+		KEY_NUMERIC_7,			/* 0a 7		*/
+		KEY_NUMERIC_8,			/* 0b 8		*/
+		KEY_NUMERIC_9,			/* 0c 9		*/
+		KEY_LEFT,			/* 0d IN	*/
+		KEY_DOWN,			/* 0e down	*/
+		KEY_NUMERIC_STAR,		/* 0f *		*/
+		KEY_NUMERIC_0,			/* 10 0		*/
+		KEY_NUMERIC_POUND,		/* 11 #		*/
+#endif
 		KEY_UP				/* 12 up	*/
 	};
 
@@ -609,16 +699,20 @@ static void report_key(struct yealink_dev *yld, int key)
 	if (yld->key_code >= 0) {
 		/* old key up */
 		input_report_key(idev, yld->key_code & 0xff, 0);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		if (yld->key_code >> 8)
 			input_report_key(idev, yld->key_code >> 8, 0);
+#endif
 	}
 
 	yld->key_code = key;
 	if (key >= 0) {
 		/* new valid key */
 		input_report_key(idev, key & 0xff, 1);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		if (key >> 8)
 			input_report_key(idev, key >> 8, 1);
+#endif
 	}
 	input_sync(idev);
 }

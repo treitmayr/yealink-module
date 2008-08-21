@@ -1,4 +1,4 @@
-Driver documentation for yealink phones and ATA adapter.
+Driver documentation for Yealink phones and ATA adapter.
 
 0. Status
 ~~~~~~~~~
@@ -7,13 +7,15 @@ USB-P1K  USB 1.1 hand phone with LCD, keypad and ringer.
 USB-P1KH USB 1.1 hand phone with LCD, keypad and ringer.
 USB-P4K  USB 1.1 speaker phone desktop model.
 USB-B2K  USB 1.1 telbox, ATA adapter for PSTN.
+USB-B3K  USB 1.1 telbox, ATA adapter for PSTN
+	 (Caller-ID and PSTN-USB-bridge currently not supported)
 
 For manufacturer documentation see http://www.yealink.com/
 
 The original development branch can be found at:
 http://cvs.savannah.gnu.org/viewcvs/usbb2k-api/yealink-module/
 
-The updated sources supporting the P1KH can be found at:
+The updated sources supporting the P1KH and B3G can be found at:
 http://www.devbase.at/svn/view.cgi/yealink-module/?root=voip
 
 
@@ -33,6 +35,8 @@ BACKLIGHT	sysfs		ok
 SPEAKER		sysfs		ok
 PSTN		sysfs			ok	ok
 LED (USB/PSTN)	sysfs			ok	ok
+Caller-ID					wip
+PSTN-USB-Bridge					wip
 
 
 Notes:
@@ -46,7 +50,7 @@ and sending a ring tone pcm via the dsp interface.
 0.1.1 Yeaphone
 ~~~~~~~~~~~~~~
 Thomas Reitmayr has released Yeaphone, a great addition to linphone, this
-will turn your P1K into a full blown SIP phone. There are even packages
+will turn your P1K(H) into a full blown SIP phone. There are even packages
 for the Linksys NSLU2 for an energy efficient and fanless solution!
 
 Please check out: http://www.devbase.at/voip/yeaphone.php
@@ -84,7 +88,7 @@ A: The sysfs files are located on the particular usb endpoint. On most
 
 2. Keyboard features
 ~~~~~~~~~~~~~~~~~~~~
-Keyboard events are processes trough the input layer. A user space application
+Keyboard events are processes through the input layer. A user space application
 may issue the EVIOCGRAB ioctl() on the corresponding /dev/input/eventX device
 to prevent the key codes from the event device to go to the rest of the system.
 
@@ -116,13 +120,20 @@ See yealink.c for a description.
 
 2.2 Hookflash
 ~~~~~~~~~~~~~
-The P4K generates KEY_PHONE up and down events when the phone taken off
-or on -hook.
+The B2K, B3K, and P4K generate KEY_PHONE up and down events when the phone
+taken off- or on-hook.
+
+
+2.3 PSTN Ring
+~~~~~~~~~~~~~
+The B2K and B3K report each individual ringtone on the PSTN line with KEY_P
+down (start of tone) and up (end of tone) events.
 
 
 3. LCD features
 ~~~~~~~~~~~~~~~
-The LCD is divided and organized as a 3 line display:
+The models P1K(H) and P4K feature an LCD which is divided and organized as
+a 3 line display:
 
     |[]   [][]   [][]   [][]   in   |[][]
     |[] M [][] D [][] : [][]   out  |[][]
@@ -175,12 +186,10 @@ For userland the following interfaces are available using the sysfs interface:
 	   map_seg7	Read/Write, the 7 segments char set, common for all
 	   		yealink phones. (see map_to_7segment.h)
 
-	   ringtone	Write, upload binary representation of a ringtone,
-	   		see yealink.c. status EXPERIMENTAL due to potential
-			races between async. and sync usb calls.
+	   ringtone	Write, upload binary representation of a ringtone
+			for P1K(H) models, see yealink.c.
 
-	   model	Read, returns available phone models with the currently
-	   		selected one.
+	   model	Read, returns the detected phone model.
 
   module parameters:
 
@@ -210,7 +219,8 @@ Writing to /sys/../lineX will set the corresponding LCD line.
 
 4.2 get_icons
 ~~~~~~~~~~~~~
-Reading will return all available icon names and its current settings:
+Reading will return all available icon names for the detected model and
+its current settings:
 
   cat ./get_icons
   on M
@@ -229,11 +239,10 @@ Reading will return all available icon names and its current settings:
      FR
      SA
      LED
-     DIALTONE
      RINGTONE
 
 
-4.3 show/hide icons
+4.3 show/hide_icons
 ~~~~~~~~~~~~~~~~~~~
 Writing to these files will update the state of the icon.
 Only one icon at a time can be updated.
@@ -256,10 +265,9 @@ updated with the first letter of the icon.
 
 4.4 model
 ~~~~~~~~~
-The phone model is auto-selected and can be queried by:
-Select and query phone model.
+This file can be read to print the current phone model.
 
-  Example - show available types (with P1K selected):
+  Example - show the current phone model:
   cat ./model
   P1K
 
@@ -269,7 +277,7 @@ Select and query phone model.
 Sound is supported by the ALSA driver: snd_usb_audio
 
 One 16-bit channel with sample and playback rates of 8000 Hz is the practical
-limit of the device.
+limit of the devices.
 
   Example - recording test:
   arecord -v -d 10 -r 8000 -f S16_LE -t wav  foobar.wav
