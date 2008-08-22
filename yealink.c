@@ -723,9 +723,9 @@ static void report_key(struct yealink_dev *yld, int key)
 
 static int check_feature_p1k(unsigned offset)
 {
-	struct yld_status *dummy;
 	return  (offset >= offsetof(struct yld_status, lcd) &&
-		 offset < offsetof(struct yld_status, lcd) + sizeof(dummy->lcd)) ||
+		 offset < offsetof(struct yld_status, lcd) +
+			  FIELD_SIZEOF(struct yld_status, lcd)) ||
 		offset == offsetof(struct yld_status, led) ||
 		offset == offsetof(struct yld_status, keynum) ||
 		offset == offsetof(struct yld_status, ringvol) ||
@@ -735,9 +735,9 @@ static int check_feature_p1k(unsigned offset)
 
 static int check_feature_p1kh(unsigned offset)
 {
-	struct yld_status *dummy;
 	return  (offset >= offsetof(struct yld_status, lcd) &&
-		 offset < offsetof(struct yld_status, lcd) + sizeof(dummy->lcd)) ||
+		 offset < offsetof(struct yld_status, lcd) +
+			  FIELD_SIZEOF(struct yld_status, lcd)) ||
 		offset == offsetof(struct yld_status, led) ||
 		offset == offsetof(struct yld_status, ringvol) ||
 		offset == offsetof(struct yld_status, ringnote_mod) ||
@@ -746,10 +746,10 @@ static int check_feature_p1kh(unsigned offset)
 
 static int check_feature_p4k(unsigned offset)
 {
-	struct yld_status *dummy;
 	return  (offset >= offsetof(struct yld_status, lcd) &&
-		 offset < offsetof(struct yld_status, lcd) + sizeof(dummy->lcd)) ||
-		offset == offsetof(struct yld_status, led) ||
+		 offset < offsetof(struct yld_status, lcd) +
+			  FIELD_SIZEOF(struct yld_status, lcd)) ||
+		/*offset == offsetof(struct yld_status, led) ||*/
 		offset == offsetof(struct yld_status, backlight) ||
 		offset == offsetof(struct yld_status, speaker) ||
 		offset == offsetof(struct yld_status, keynum) ||
@@ -1890,7 +1890,7 @@ static int update_version_init(struct yealink_dev *yld)
 		yld->timer_delay = YEALINK_COMMAND_DELAY_G2;
 	}
 	/* calculate ticks */
-	yld->timer_delay = (HZ * yld->timer_delay + 999) / 1000;
+	yld->timer_delay = DIV_ROUND_UP(HZ * yld->timer_delay, 1000);
 
 leave_clean:
         kfree(int_data);
