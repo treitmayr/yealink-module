@@ -159,12 +159,12 @@ struct model_info {
 struct yealink_dev {
 	struct input_dev	*idev;		/* input device */
 	struct usb_device	*udev;		/* usb device */
-	struct usb_interface	*interface;	/* interface for the device */
+	struct usb_interface	*intf;		/* interface for the device */
 	struct usb_endpoint_descriptor *int_endpoint;	/* interrupt EP */
 
-	struct timer_list	timer;		/* timer for key/hook scans */
+	const struct model_info	*model;		/* device model */
 
-	const struct model_info	*model;
+	struct timer_list	timer;		/* timer for key/hook scans */
 	unsigned long		timer_delay;	/* model-specific timer delay */
 
 	/* irq input channel */
@@ -184,16 +184,14 @@ struct yealink_dev {
 	unsigned	update_active:1;
 	unsigned	timer_expired:1;
 	unsigned	usb_pause:1;
-	spinlock_t	flags_lock;		/* protects above flags */
+	spinlock_t	flags_lock;	/* protects above flags */
 
 	unsigned	open:1;
 	unsigned	shutdown:1;
-
-	/* control output channel for repetitive key/hook scans;
-	   TODO: possibly revert to individual fields, like with irq channel */
+	struct mutex	pm_mutex;	/* protects writes to above flags */
 
 	char	phys[64];		/* physical device path */
-	char	uniq[27];		/* unique(?) device number */
+	char	uniq[27];		/* (semi-)unique device number */
 	char	name[20];		/* full device name */
 
 	u8 lcdMap[ARRAY_SIZE(lcdMap)];	/* state of LCD, LED ... */
@@ -415,7 +413,6 @@ static int set_ringnotes(struct yealink_dev *yld, u8 *buf, size_t size)
 static int map_p1k_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_1,			 	/* 00 1		*/
 		KEY_2,				/* 01 2		*/
 		KEY_3,				/* 02 3		*/
@@ -443,35 +440,6 @@ static int map_p1k_to_key(unsigned scancode)
 		KEY_KPASTERISK,			/* 30 *		*/
 		KEY_0,				/* 31 0		*/
 		KEY_LEFTSHIFT | KEY_3 << 8,	/* 32 #		*/
-#else
-		KEY_NUMERIC_1,		 	/* 00 1		*/
-		KEY_NUMERIC_2,			/* 01 2		*/
-		KEY_NUMERIC_3,			/* 02 3		*/
-		KEY_ENTER,			/* 03 pickup	*/
-		KEY_RIGHT,			/* 04 OUT	*/
-		-EINVAL,			/* 05		*/
-		-EINVAL,			/* 06		*/
-		-EINVAL,			/* 07		*/
-		KEY_NUMERIC_4,			/* 10 4		*/
-		KEY_NUMERIC_5,			/* 11 5		*/
-		KEY_NUMERIC_6,			/* 12 6		*/
-		KEY_ESC,			/* 13 hangup	*/
-		KEY_BACKSPACE,			/* 14 C		*/
-		-EINVAL,			/* 15		*/
-		-EINVAL,			/* 16		*/
-		-EINVAL,			/* 17		*/
-		KEY_NUMERIC_7,			/* 20 7		*/
-		KEY_NUMERIC_8,			/* 21 8		*/
-		KEY_NUMERIC_9,			/* 22 9		*/
-		KEY_LEFT,			/* 23 IN	*/
-		KEY_DOWN,			/* 24 down	*/
-		-EINVAL,			/* 25		*/
-		-EINVAL,			/* 26		*/
-		-EINVAL,			/* 27		*/
-		KEY_NUMERIC_STAR,		/* 30 *		*/
-		KEY_NUMERIC_0,			/* 31 0		*/
-		KEY_NUMERIC_POUND,		/* 32 #		*/
-#endif
 		KEY_UP				/* 33 up	*/
 	};
 
@@ -503,7 +471,6 @@ static int map_p4k_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
 		KEY_ENTER,		 	/* 00 DIAL	*/
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_3,				/* 01 3		*/
 		KEY_6,				/* 02 6		*/
 		KEY_9,				/* 03 9		*/
@@ -524,28 +491,6 @@ static int map_p4k_to_key(unsigned scancode)
 		KEY_4,				/* 22 4		*/
 		KEY_7,				/* 23 7		*/
 		KEY_KPASTERISK,			/* 24 *		*/
-#else
-		KEY_NUMERIC_3,			/* 01 3		*/
-		KEY_NUMERIC_6,			/* 02 6		*/
-		KEY_NUMERIC_9,			/* 03 9		*/
-		KEY_NUMERIC_POUND,		/* 04 #		*/
-		KEY_HELP,			/* 05 HELP	*/
-		-EINVAL,			/* 06		*/
-		-EINVAL,			/* 07		*/
-		KEY_RIGHT,			/* 10 OUT	*/
-		KEY_NUMERIC_2,			/* 11 2		*/
-		KEY_NUMERIC_5,			/* 12 5		*/
-		KEY_NUMERIC_8,			/* 13 8		*/
-		KEY_NUMERIC_0,			/* 14 0		*/
-		KEY_ESC,			/* 15 FLASH	*/
-		-EINVAL,			/* 16		*/
-		-EINVAL,			/* 17		*/
-		KEY_H,				/* 20 handsfree	*/
-		KEY_NUMERIC_1,			/* 21 1		*/
-		KEY_NUMERIC_4,			/* 22 4		*/
-		KEY_NUMERIC_7,			/* 23 7		*/
-		KEY_NUMERIC_STAR,		/* 24 *		*/
-#endif
 		KEY_S,				/* 25 SEND	*/
 		-EINVAL,			/* 26		*/
 		-EINVAL,			/* 27		*/
@@ -585,7 +530,6 @@ static int map_p4k_to_key(unsigned scancode)
 static int map_b2k_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_0,			 	/* 00 0		*/
 		KEY_1,			 	/* 01 1		*/
 		KEY_2,				/* 02 2		*/
@@ -599,21 +543,6 @@ static int map_b2k_to_key(unsigned scancode)
 		-EINVAL,                        /* 0a		*/
 		KEY_KPASTERISK,			/* 0b *		*/
 		KEY_LEFTSHIFT | KEY_3 << 8	/* 0c #		*/
-#else
-		KEY_NUMERIC_0,		 	/* 00 0		*/
-		KEY_NUMERIC_1,		 	/* 01 1		*/
-		KEY_NUMERIC_2,			/* 02 2		*/
-		KEY_NUMERIC_3,			/* 03 3		*/
-		KEY_NUMERIC_4,			/* 04 4		*/
-		KEY_NUMERIC_5,			/* 05 5		*/
-		KEY_NUMERIC_6,			/* 06 6		*/
-		KEY_NUMERIC_7,			/* 07 7		*/
-		KEY_NUMERIC_8,			/* 08 8		*/
-		KEY_NUMERIC_9,			/* 09 9		*/
-		-EINVAL,                        /* 0a		*/
-		KEY_NUMERIC_STAR,		/* 0b *		*/
-		KEY_NUMERIC_POUND		/* 0c #		*/
-#endif
 	};
 	static const int map2[] = {		/* code	key	*/
 		KEY_PHONE,			/* on-hook	*/
@@ -638,7 +567,6 @@ static int map_b2k_to_key(unsigned scancode)
 static int map_p1kh_to_key(unsigned scancode)
 {
 	static const int map[] = {		/* code	key	*/
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		KEY_1,			 	/* 00 1		*/
 		KEY_2,				/* 01 2		*/
 		KEY_3,				/* 02 3		*/
@@ -657,26 +585,6 @@ static int map_p1kh_to_key(unsigned scancode)
 		KEY_KPASTERISK,			/* 0f *		*/
 		KEY_0,				/* 10 0		*/
 		KEY_LEFTSHIFT | KEY_3 << 8,	/* 11 #		*/
-#else
-		KEY_NUMERIC_1,		 	/* 00 1		*/
-		KEY_NUMERIC_2,			/* 01 2		*/
-		KEY_NUMERIC_3,			/* 02 3		*/
-		KEY_ENTER,			/* 03 pickup	*/
-		KEY_RIGHT,			/* 04 OUT	*/
-		KEY_NUMERIC_4,			/* 05 4		*/
-		KEY_NUMERIC_5,			/* 06 5		*/
-		KEY_NUMERIC_6,			/* 07 6		*/
-		KEY_ESC,			/* 08 hangup	*/
-		KEY_BACKSPACE,			/* 09 C		*/
-		KEY_NUMERIC_7,			/* 0a 7		*/
-		KEY_NUMERIC_8,			/* 0b 8		*/
-		KEY_NUMERIC_9,			/* 0c 9		*/
-		KEY_LEFT,			/* 0d IN	*/
-		KEY_DOWN,			/* 0e down	*/
-		KEY_NUMERIC_STAR,		/* 0f *		*/
-		KEY_NUMERIC_0,			/* 10 0		*/
-		KEY_NUMERIC_POUND,		/* 11 #		*/
-#endif
 		KEY_UP				/* 12 up	*/
 	};
 
@@ -699,20 +607,16 @@ static void report_key(struct yealink_dev *yld, int key)
 	if (yld->key_code >= 0) {
 		/* old key up */
 		input_report_key(idev, yld->key_code & 0xff, 0);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		if (yld->key_code >> 8)
 			input_report_key(idev, yld->key_code >> 8, 0);
-#endif
 	}
 
 	yld->key_code = key;
 	if (key >= 0) {
 		/* new valid key */
 		input_report_key(idev, key & 0xff, 1);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
 		if (key >> 8)
 			input_report_key(idev, key >> 8, 1);
-#endif
 	}
 	input_sync(idev);
 }
@@ -1289,20 +1193,25 @@ static void timer_callback_g2(unsigned long ylda)
 static void urb_irq_callback(struct urb *urb)
 {
 	struct yealink_dev *yld = urb->context;
+	const int status = urb->status;
 	enum yld_ctl_protocols proto;
 	u8 data0;
 	int ret = 0;
-	int status = urb->status;
 
-	dbg("%s", __FUNCTION__);
 	proto = yld->model->protocol;
 	data0 = (proto == yld_ctl_protocol_g1) ?
 	          yld->irq_data->g1.data[0] : yld->irq_data->g2.data[0];
 
 	if (unlikely(status)) {
+		if (status == -ESHUTDOWN)
+			return;
 		err("%s - urb status %d", __FUNCTION__, status);
 		goto send_next;		/* do not process the irq_data */
 	}
+
+	dev_dbg(&urb->dev->dev, "### URB IRQ: cmd=0x%02x, data0=0x%02x",
+		yld->irq_data->cmd, data0);
+
 	if (unlikely(pkt_verify_checksum(yld->irq_data, USB_PKT_LEN(proto)) != 0)) {
 		warn("Received packet with invalid checksum, dropping it");
 		goto send_next;		/* do not process the irq_data */
@@ -1317,10 +1226,9 @@ static void urb_irq_callback(struct urb *urb)
 		data0 = yld->irq_data->g1.data[1];
 
 	case CMD_HANDSET:
-		/* B2K (fall-through: B3G) */
+		/* B2K + B3G (fall-through) */
 		ret = data0 & 0x01;		/* PSTN ring */
 		if (yld->pstn_ring != ret) {
-			dbg("pstnring: %x", ret);
 			if (yld->open) {
 				input_report_key(yld->idev, KEY_P, ret);
 				input_sync(yld->idev);
@@ -1332,11 +1240,10 @@ static void urb_irq_callback(struct urb *urb)
 				(yld->irq_data->g1.data[2] << 4);
 
 	case CMD_HOOKPRESS:
-		/* P4K (fall-through: B2K, B3G) */
+		/* P4K + B2K+B3G (fall-through) */
 		ret = data0 & 0x10;
 		if (yld->hookstate == ret)
 			break;
-		dbg("hookstate: %x", ret);
 		if (yld->open) {
 			input_report_key(yld->idev, KEY_PHONE, ret >> 4);
 			input_sync(yld->idev);
@@ -1345,12 +1252,11 @@ static void urb_irq_callback(struct urb *urb)
 		break;
 
 	case CMD_SCANCODE:
-		dbg("get scancode %x", data0);
 		ret = yld->model->keycode(data0);
 		if (yld->open)
 			report_key(yld, ret);
 		if (ret < 0 && data0 != 0xff)
-			info("unknown scancode 0x%02x", data0);
+			warn("unknown scancode 0x%02x", data0);
 		break;
 
 	case STATE_BAD_PKT:
@@ -1380,12 +1286,14 @@ send_next:
 static void urb_ctl_callback(struct urb *urb)
 {
 	struct yealink_dev *yld = urb->context;
-	int ret = 0;
 	int status = urb->status;
+	int ret = 0;
 
-	dbg("%s", __FUNCTION__);
-	if (status)
+	if (unlikely(status)) {
+		if (status == -ESHUTDOWN)
+			return;
 		err("%s - urb status %d", __FUNCTION__, status);
+	}
 
 	if (yld->model->protocol == yld_ctl_protocol_g2) {
 		if (likely(!yld->shutdown))
@@ -1635,7 +1543,7 @@ static ssize_t set_icon(struct device *dev, const char *buf, size_t count,
 
 	down_write(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
-	if (unlikely(yld == NULL || yld->model == NULL)) {
+	if (unlikely(yld == NULL)) {
 		up_write(&sysfs_rwsema);
 		return -ENODEV;
 	}
@@ -1688,7 +1596,7 @@ static ssize_t store_ringtone(struct device *dev,
 
 	down_write(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
-	if (unlikely(yld == NULL || yld->model == NULL)) {
+	if (unlikely(yld == NULL)) {
 		up_write(&sysfs_rwsema);
 		return -ENODEV;
 	}
@@ -1696,9 +1604,9 @@ static ssize_t store_ringtone(struct device *dev,
 		up_write(&sysfs_rwsema);
 		return ret;
 	}
-	YEALINK_DBG_FLAGS("R:");
 
 	/* first stop the whole USB cycle */
+	YEALINK_DBG_FLAGS("R:");
 	yld->usb_pause = 1;
 	smp_wmb();
 	i = 10;
@@ -1708,16 +1616,16 @@ static ssize_t store_ringtone(struct device *dev,
 		spin_unlock_irq(&yld->flags_lock);
 		if (stopped)
 			break;
-		dbg("sleep");
 		msleep_interruptible(50);
 	}
-
 	YEALINK_DBG_FLAGS("  ");
+
+	/* now write the ringnotes and restart USB transfers */
 	if (stopped) {
 		set_ringnotes(yld, (char *)buf, count);
 		yld->master.s.ringnote_mod++;
 		yld->usb_pause = 0;
-		smp_wmb();
+		smp_wmb();		/* needed ? */
 		if (poke_update_from_userspace(yld) != 0)
 			ret = -ERESTARTSYS;
 	} else {
@@ -1731,13 +1639,13 @@ static ssize_t store_ringtone(struct device *dev,
 
 /* Get the name of the detected phone model. */
 static ssize_t show_model(struct device *dev, struct device_attribute *attr,
-			char *buf)
+			  char *buf)
 {
 	struct yealink_dev *yld;
 
 	down_read(&sysfs_rwsema);
 	yld = dev_get_drvdata(dev);
-	if (yld == NULL) {
+	if (unlikely(yld == NULL)) {
 		up_read(&sysfs_rwsema);
 		return -ENODEV;
 	}
@@ -1795,13 +1703,6 @@ static int update_version_init(struct yealink_dev *yld)
 	u8 *data;
 	u16 version;
 	int ret = 0;
-
-	might_sleep();
-
-	if (!yld->model) {
-		warn("%s - no model preselected!", __FUNCTION__);
-		return -ENODEV;
-	}
 
 	proto = yld->model->protocol;
 	len = USB_PKT_LEN(proto);
@@ -1926,7 +1827,7 @@ static int init_state(struct yealink_dev *yld)
 		setChar(yld, i, ' ');
 
 	/* display driver version on LCD line 3 */
-	store_line(&yld->interface->dev, "yld-" DRIVER_VERSION,
+	store_line(&yld->intf->dev, "yld-" DRIVER_VERSION,
 		sizeof("yld-" DRIVER_VERSION),
 		LCD_LINE3_OFFSET, LCD_LINE3_SIZE, 0);
 
@@ -2027,9 +1928,6 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 			input_unregister_device(yld->idev);
 	}
 
-	usb_free_urb(yld->urb_irq);
-	usb_free_urb(yld->urb_ctl);
-
 	if (yld->ctl_req)
 		usb_buffer_free(yld->udev, sizeof(*(yld->ctl_req)),
 		                yld->ctl_req, yld->ctl_req_dma);
@@ -2040,6 +1938,8 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 		usb_buffer_free(yld->udev, USB_PKT_LEN(yld->model->protocol),
 		                yld->irq_data, yld->irq_dma);
 
+	usb_free_urb(yld->urb_irq);
+	usb_free_urb(yld->urb_ctl);
 	kfree(yld);
 	return err;
 }
@@ -2109,7 +2009,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		return -ENOMEM;
 
 	yld->udev = udev;
-	yld->interface = intf;
+	yld->intf = intf;
 	yld->int_endpoint = endpoint;
 
 	/* get a handle to the interrupt data pipe */
