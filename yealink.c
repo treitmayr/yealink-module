@@ -72,6 +72,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
+//#include <linux/semaphore.h>
 #include <linux/rwsem.h>
 #include <linux/timer.h>
 #include <linux/usb/input.h>
@@ -180,15 +181,16 @@ struct yealink_dev {
 	struct urb		*urb_ctl;
 
 	/* flags */
+	unsigned		open:1;
+	unsigned		shutdown:1;
+	struct semaphore	usb_active_sem;
+	struct mutex 		pm_mutex;
+
 	unsigned	scan_active:1;
 	unsigned	update_active:1;
 	unsigned	timer_expired:1;
 	unsigned	usb_pause:1;
 	spinlock_t	flags_lock;	/* protects above flags */
-
-	unsigned	open:1;
-	unsigned	shutdown:1;
-	struct mutex	pm_mutex;	/* protects writes to above flags */
 
 	char	phys[64];		/* physical device path */
 	char	uniq[27];		/* (semi-)unique device number */
@@ -265,7 +267,7 @@ static const struct model_info model[] = {
 };
 
 /* forward declaration */
-static void stop_traffic(struct yealink_dev *yld);
+//static void stop_traffic(struct yealink_dev *yld); @@@
 
 /*******************************************************************************
  * Yealink lcd interface
@@ -1002,7 +1004,9 @@ static int poke_update_from_userspace(struct yealink_dev *yld)
 	int ret = 0;
 	unsigned long spin_flags;
 
-	BUG_ON(yld->usb_pause);
+	//BUG_ON(yld->usb_pause);	@@@
+	if (yld->usb_pause)
+		return 0;
 
 	proto = yld->model->protocol;
 
@@ -1091,6 +1095,9 @@ static int perform_single_update_g1(struct yealink_dev *yld)
 		pkt_update_checksum(yld->ctl_data, USB_PKT_LEN_G1);
 		if (likely(!yld->shutdown))
 			ret = usb_submit_urb(yld->urb_ctl, GFP_ATOMIC);
+	} else if (!yld->open) {
+		dbg("   stopping usb traffic");
+		up(&yld->usb_active_sem);	// @@@
 	} else if (do_scan) {
 		if (likely(!yld->shutdown))
 			ret = submit_scan_request(yld, GFP_ATOMIC);
@@ -1129,6 +1136,9 @@ static int perform_single_update_g2(struct yealink_dev *yld)
 		pkt_update_checksum(yld->ctl_data, USB_PKT_LEN_G2);
 		if (likely(!yld->shutdown))
 			ret = usb_submit_urb(yld->urb_ctl, GFP_ATOMIC);
+	} else if (!yld->open) {
+		dbg("   stopping usb traffic");
+		up(&yld->usb_active_sem);	// @@@
 	} else {
 		dbg("   pausing updates");
 	}
@@ -1209,7 +1219,7 @@ static void urb_irq_callback(struct urb *urb)
 		goto send_next;		/* do not process the irq_data */
 	}
 
-	dev_dbg(&urb->dev->dev, "### URB IRQ: cmd=0x%02x, data0=0x%02x",
+	dev_dbg(&urb->dev->dev, "### URB IRQ: cmd=0x%02x, data0=0x%02x\n",
 		yld->irq_data->cmd, data0);
 
 	if (unlikely(pkt_verify_checksum(yld->irq_data, USB_PKT_LEN(proto)) != 0)) {
@@ -1318,59 +1328,6 @@ static void urb_ctl_callback(struct urb *urb)
 
 	if (ret)
 		err("%s - urb submission failed %d", __FUNCTION__, ret);
-}
-
-/*******************************************************************************
- * input event interface
- ******************************************************************************/
-
-/* TODO should we issue a ringtone on a SND_BELL event?
-static int input_ev(struct input_dev *dev, unsigned int type,
-		unsigned int code, int value)
-{
-
-	if (type != EV_SND)
-		return -EINVAL;
-
-	switch (code) {
-	case SND_BELL:
-	case SND_TONE:
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return 0;
-}
-*/
-
-static int input_open(struct input_dev *dev)
-{
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
-	struct yealink_dev *yld = dev->private;
-#else
-	struct yealink_dev *yld = input_get_drvdata(dev);
-#endif
-
-	down_write(&sysfs_rwsema);
-	yld->open = 1;
-	up_write(&sysfs_rwsema);
-
-	return 0;
-}
-
-static void input_close(struct input_dev *dev)
-{
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
-	struct yealink_dev *yld = dev->private;
-#else
-	struct yealink_dev *yld = input_get_drvdata(dev);
-#endif
-
-	down_write(&sysfs_rwsema);
-	yld->open = 0;
-	up_write(&sysfs_rwsema);
-	stop_traffic(yld);
 }
 
 /*******************************************************************************
@@ -1845,20 +1802,25 @@ static int init_state(struct yealink_dev *yld)
 	return 0;
 }
 
-static int start_traffic(struct yealink_dev *yld)
+static int start_traffic(struct yealink_dev *yld, int with_key_scan)
 {
+	enum yld_ctl_protocols proto;
 	int ret = 0;
 
+	proto = yld->model->protocol;
+
 	yld->usb_pause = 0;
+	yld->timer_expired = (proto == yld_ctl_protocol_g1) ? 0 : 1;
+
 	if (likely(!yld->shutdown)) {
-		if (yld->model->protocol == yld_ctl_protocol_g1) {
-			/* start the periodic scan timer */
-			mod_timer(&yld->timer, jiffies + yld->timer_delay);
-		} else { /* yld_ctl_protocol_g2 */
-			/* immediately start waiting for a key */
-			ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
-			/* pretend that the timer is already expired */
-			yld->timer_expired = 1;
+		if (with_key_scan) {
+			if (proto == yld_ctl_protocol_g1) {
+				/* start the periodic scan timer */
+				mod_timer(&yld->timer, jiffies + yld->timer_delay);
+			} else { /* yld_ctl_protocol_g2 */
+				/* immediately start waiting for a key */
+				ret = usb_submit_urb(yld->urb_irq, GFP_KERNEL);
+			}
 		}
 		if (ret == 0)
 			ret = poke_update_from_userspace(yld);
@@ -1879,6 +1841,98 @@ static void stop_traffic(struct yealink_dev *yld)
 
 	yld->shutdown = 0;
 	smp_wmb();
+}
+
+/*******************************************************************************
+ * input event interface
+ ******************************************************************************/
+
+/* TODO should we issue a ringtone on a SND_BELL event?
+static int input_ev(struct input_dev *dev, unsigned int type,
+		unsigned int code, int value)
+{
+
+	if (type != EV_SND)
+		return -EINVAL;
+
+	switch (code) {
+	case SND_BELL:
+	case SND_TONE:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+*/
+
+static int input_open(struct input_dev *dev)
+{
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
+	struct yealink_dev *yld = dev->private;
+#else
+	struct yealink_dev *yld = input_get_drvdata(dev);
+#endif
+	int ret;
+	int i;
+
+	dbg("**** input_open ****");
+	ret = usb_autopm_get_interface(yld->intf);
+	if (ret < 0) {
+		err("%s - cannot autoresume, result %d",
+		    __FUNCTION__, ret);
+		return ret;
+	}
+
+	mutex_lock(&yld->pm_mutex);
+	i = 20;
+	while ((ret = down_trylock(&yld->usb_active_sem)) && i--) {
+		dbg("waiting...");
+		msleep_interruptible(100);
+	}
+	//ret = down_timeout(&yld->usb_active_sem, HZ * 2);
+	if (ret != 0) {
+		err("%s - cannot acquire semaphore", __FUNCTION__);
+		return -ERESTARTSYS;
+	}
+	init_state(yld);
+	yld->open = 1;
+	ret = start_traffic(yld, 1);
+	if (ret != 0) {
+		up(&yld->usb_active_sem);
+		yld->open = 0;
+	}
+	mutex_unlock(&yld->pm_mutex);
+
+	if (ret != 0)
+		usb_autopm_put_interface(yld->intf);
+
+	return ret;
+}
+
+static void input_close(struct input_dev *dev)
+{
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,21)
+	struct yealink_dev *yld = dev->private;
+#else
+	struct yealink_dev *yld = input_get_drvdata(dev);
+#endif
+
+	mutex_lock(&yld->pm_mutex);
+	yld->open = 0;
+
+	//stop_traffic(yld);
+	yld->shutdown = 1;
+	smp_wmb();			/* make sure other CPUs see this */
+	if (yld->timer.data != (unsigned long) NULL)
+		del_timer_sync(&yld->timer);
+	yld->shutdown = 0;
+	smp_wmb();
+
+	mutex_unlock(&yld->pm_mutex);
+
+	usb_autopm_put_interface(yld->intf);
 }
 
 /*******************************************************************************
@@ -1919,6 +1973,9 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 	if (yld == NULL)
 		return err;
 
+	yld->open = 0;
+	up(&yld->usb_active_sem);
+
 	stop_traffic(yld);
 
         if (yld->idev) {
@@ -1948,7 +2005,12 @@ static int usb_suspend(struct usb_interface *intf, pm_message_t message)
 {
 	struct yealink_dev *yld = usb_get_intfdata(intf);
 
+	dev_info(&intf->dev, "yealink: usb_suspend (event=%d)\n", message.event);
+
+	mutex_lock(&yld->pm_mutex);
 	stop_traffic(yld);
+	mutex_unlock(&yld->pm_mutex);
+
 	return 0;
 }
 
@@ -1957,8 +2019,13 @@ static int usb_resume(struct usb_interface *intf)
 	struct yealink_dev *yld = usb_get_intfdata(intf);
 	int ret;
 
+	dev_info(&intf->dev, "yealink: usb_resume\n");
+
+	mutex_lock(&yld->pm_mutex);
 	restore_state(yld);
-	ret = start_traffic(yld);
+	ret = start_traffic(yld, 1);
+	mutex_unlock(&yld->pm_mutex);
+
 	return ret;
 }
 
@@ -1967,11 +2034,16 @@ static int usb_reset_resume(struct usb_interface *intf)
 	struct yealink_dev *yld = usb_get_intfdata(intf);
 	int ret;
 
+	dev_info(&intf->dev, "yealink: usb_reset_resume\n");
+
+	mutex_lock(&yld->pm_mutex);
 	ret = update_version_init(yld);
 	if (ret == 0) {
 		restore_state(yld);
-		ret = start_traffic(yld);
+		ret = start_traffic(yld, 1);
 	}
+	mutex_unlock(&yld->pm_mutex);
+
 	return ret;
 }
 
@@ -2008,6 +2080,10 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (!yld)
 		return -ENOMEM;
 
+	spin_lock_init(&yld->flags_lock);
+	mutex_init(&yld->pm_mutex);
+	init_MUTEX_LOCKED(&yld->usb_active_sem);
+
 	yld->udev = udev;
 	yld->intf = intf;
 	yld->int_endpoint = endpoint;
@@ -2032,8 +2108,6 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	ret = update_version_init(yld);
 	if (ret != 0)
 		return usb_cleanup(yld, -ENODEV);
-
-	spin_lock_init(&yld->flags_lock);
 
 	yld->idev = input_dev = input_allocate_device();
 	if (!input_dev)
@@ -2139,7 +2213,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	/* initialize the device and start the key/hook scanner */
 	init_state(yld);
-	ret = start_traffic(yld);
+	ret = start_traffic(yld, 0);
 	if (ret != 0)
 		return usb_cleanup(yld, ret);
 
