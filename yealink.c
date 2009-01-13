@@ -1251,7 +1251,7 @@ static void urb_irq_callback(struct urb *urb)
 
 	case CMD_HOOKPRESS:
 		/* P4K + B2K+B3G (fall-through) */
-		ret = data0 & 0x10;
+		ret = ~data0 & 0x10;
 		if (yld->hookstate == ret)
 			break;
 		if (yld->open) {
