@@ -1252,7 +1252,7 @@ static void urb_irq_callback(struct urb *urb)
 		if (yld->pstn_ring != ret) {
 			if (yld->open) {
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
-				input_regs(idev, regs);
+				input_regs(yld->idev, regs);
 #endif
 				input_report_key(yld->idev, KEY_P, ret);
 				input_sync(yld->idev);
@@ -1270,7 +1270,7 @@ static void urb_irq_callback(struct urb *urb)
 			break;
 		if (yld->open) {
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
-			input_regs(idev, regs);
+			input_regs(yld->idev, regs);
 #endif
 			input_report_key(yld->idev, KEY_PHONE, ret >> 4);
 			input_sync(yld->idev);
