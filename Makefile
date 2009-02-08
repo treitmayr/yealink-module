@@ -1,5 +1,6 @@
 #MAKE_OPTS=-C /usr/src/linux SUBDIRS=`pwd` V=1
 MAKE_OPTS=-C /usr/src/linux SUBDIRS=`pwd`
+#MAKE_OPTS=-C /usr/src/linux-2.6.25-gentoo-r1 SUBDIRS=`pwd`
 PATH_SYSFS :=$(shell find /sys/ -name get_icons | sed 's/\/get_icons//')
 #EXTRA_CFLAGS += -DDEBUG -O0 -g -Wall
 SHELL := $(shell which bash)
@@ -36,7 +37,8 @@ tar:
 	tar jcvf yealink.tar.bz2 README TODO Makefile *.[ch]
 
 dist:
-	vers=`grep 'define  *DRIVER_VERSION' yealink.c | sed 's/.*-\\([0-9]*\\).*/\\1/'` ; \
+	vers=`grep 'define  *DRIVER_VERSION' yealink.c` ; \
+	vers=$${vers#*\"} ; vers=$${vers%\"*} ; \
 	echo "creating yealink-module-$${vers}.tar.bz2"; \
 	mkdir yealink-module-$${vers}; \
 	cp README TODO Makefile *.[ch] yealink-module-$${vers}; \

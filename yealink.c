@@ -80,8 +80,8 @@
 #include "map_to_7segment.h"
 #include "yealink.h"
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,21)
-#error "Need kernel version 2.6.21 or higher"
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
+#error "Need kernel version 2.6.18 or higher"
 #endif
 
 #define DRIVER_VERSION	"20080819"
@@ -602,10 +602,17 @@ static int map_p1kh_to_key(unsigned scancode)
  *
  * The key parameter can be cascaded: key2 << 8 | key1
  */
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
+static void report_key(struct yealink_dev *yld, int key, struct pt_regs *regs)
+#else
 static void report_key(struct yealink_dev *yld, int key)
+#endif
 {
 	struct input_dev *idev = yld->idev;
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
+	input_regs(idev, regs);
+#endif
 	if (yld->key_code >= 0) {
 		/* old key up */
 		input_report_key(idev, yld->key_code & 0xff, 0);
@@ -1200,7 +1207,11 @@ static void timer_callback_g2(unsigned long ylda)
 
 /*
  */
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
+static void urb_irq_callback(struct urb *urb, struct pt_regs *regs)
+#else
 static void urb_irq_callback(struct urb *urb)
+#endif
 {
 	struct yealink_dev *yld = urb->context;
 	const int status = urb->status;
@@ -1240,6 +1251,9 @@ static void urb_irq_callback(struct urb *urb)
 		ret = data0 & 0x01;		/* PSTN ring */
 		if (yld->pstn_ring != ret) {
 			if (yld->open) {
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
+				input_regs(idev, regs);
+#endif
 				input_report_key(yld->idev, KEY_P, ret);
 				input_sync(yld->idev);
 			}
@@ -1255,6 +1269,9 @@ static void urb_irq_callback(struct urb *urb)
 		if (yld->hookstate == ret)
 			break;
 		if (yld->open) {
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
+			input_regs(idev, regs);
+#endif
 			input_report_key(yld->idev, KEY_PHONE, ret >> 4);
 			input_sync(yld->idev);
 		}
@@ -1264,7 +1281,11 @@ static void urb_irq_callback(struct urb *urb)
 	case CMD_SCANCODE:
 		ret = yld->model->keycode(data0);
 		if (yld->open)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
+			report_key(yld, ret, regs);
+#else
 			report_key(yld, ret);
+#endif
 		if (ret < 0 && data0 != 0xff)
 			warn("unknown scancode 0x%02x", data0);
 		break;
@@ -1293,7 +1314,11 @@ send_next:
  * 
  * This function is invoked when the control URB was submitted.
  */
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18)
+static void urb_ctl_callback(struct urb *urb, struct pt_regs *regs)
+#else
 static void urb_ctl_callback(struct urb *urb)
+#endif
 {
 	struct yealink_dev *yld = urb->context;
 	int status = urb->status;
@@ -1878,6 +1903,7 @@ static int input_open(struct input_dev *dev)
 	int i;
 
 	dbg("**** input_open ****");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 	ret = usb_autopm_get_interface(yld->intf);
 	if (ret < 0) {
 		err("%s - cannot autoresume, result %d",
@@ -1885,6 +1911,7 @@ static int input_open(struct input_dev *dev)
 		return ret;
 	}
 
+#endif
 	mutex_lock(&yld->pm_mutex);
 	i = 20;
 	while ((ret = down_trylock(&yld->usb_active_sem)) && i--) {
@@ -1905,9 +1932,11 @@ static int input_open(struct input_dev *dev)
 	}
 	mutex_unlock(&yld->pm_mutex);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 	if (ret != 0)
 		usb_autopm_put_interface(yld->intf);
 
+#endif
 	return ret;
 }
 
@@ -1931,8 +1960,10 @@ static void input_close(struct input_dev *dev)
 	smp_wmb();
 
 	mutex_unlock(&yld->pm_mutex);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 
 	usb_autopm_put_interface(yld->intf);
+#endif
 }
 
 /*******************************************************************************
@@ -2029,6 +2060,7 @@ static int usb_resume(struct usb_interface *intf)
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
 static int usb_reset_resume(struct usb_interface *intf)
 {
 	struct yealink_dev *yld = usb_get_intfdata(intf);
@@ -2047,6 +2079,7 @@ static int usb_reset_resume(struct usb_interface *intf)
 	return ret;
 }
 
+#endif
 static void usb_disconnect(struct usb_interface *intf)
 {
 	struct yealink_dev *yld;
@@ -2236,7 +2269,9 @@ static struct usb_driver yealink_driver = {
 	.disconnect	= usb_disconnect,
 	.suspend	= usb_suspend,
 	.resume		= usb_resume,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
 	.reset_resume	= usb_reset_resume,
+#endif
 	.id_table	= usb_table,
 };
 
