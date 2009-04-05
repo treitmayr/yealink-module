@@ -104,6 +104,18 @@
    updated LCD were observed. */
 #define YEALINK_COMMAND_DELAY_G2	25	/* in [ms] */
 
+/* Make sure we have the following macros (independent of kernel versions) */
+#ifndef warn
+#define warn(format, arg...) printk(KERN_WARNING KBUILD_MODNAME ": " \
+	format "\n" , ## arg)
+#endif
+
+#ifndef info
+#define info(format, arg...) printk(KERN_INFO KBUILD_MODNAME ": " \
+	format "\n" , ## arg)
+#endif
+
+/* for in-depth debugging */
 #define YEALINK_DBG_FLAGS(p) dbg("%s t=%d,u=%d,s=%d,p=%d",(p),yld->timer_expired,\
 				yld->update_active,yld->scan_active,yld->usb_pause)
 
@@ -1727,7 +1739,7 @@ static int update_version_init(struct yealink_dev *yld)
 	}
 	if (!yld->model) {
 		int pid = le16_to_cpu(yld->udev->descriptor.idProduct);
-		info("Yealink model not supported: "
+		warn("Yealink model not supported: "
 			"PID %04x, version 0x%04x.", pid, version);
 		ret = -ENODEV;
 		goto leave_clean;
