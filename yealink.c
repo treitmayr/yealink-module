@@ -559,7 +559,7 @@ static int map_b2k_to_key(unsigned scancode)
 		KEY_LEFTSHIFT | KEY_3 << 8	/* 0c #		*/
 	};
 	static const int map2[] = {		/* code	key	*/
-		KEY_PHONE,			/* on-hook	*/
+		KEY_PHONE,			/* off-hook	*/
 		KEY_P				/* PSTN ring	*/
 	};
 
@@ -806,8 +806,11 @@ static int submit_cmd_int_sync(struct yealink_dev *yld,
 			continue;
 		ret = submit_int_sync(yld, ip, ilen);
 		if ((ret == 0) && (ip->cmd != cp->cmd))
-			ret = -ENODATA;
+			ret = -ENOMSG;
 	}
+	if (ret == -ENOMSG)
+		err("%s - command 0x%02x, reply 0x%02x", __FUNCTION__,
+							ip->cmd, cp->cmd);
 	return ret;
 }
 
@@ -1761,7 +1764,7 @@ static int update_version_init(struct yealink_dev *yld)
 
 	ret = submit_cmd_int_sync(yld, ctl_data, len, int_data, len);
 	if (ret != 0)
-		return ret;
+		goto leave_clean;
 
 	len = USB_PKT_DATA_LEN(proto);
 	if ((len * 2 + 5) > sizeof(yld->uniq)) {
