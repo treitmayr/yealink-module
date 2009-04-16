@@ -802,15 +802,16 @@ static int submit_cmd_int_sync(struct yealink_dev *yld,
 	int ret = -1;
 	while ((ret != 0) && (repeat-- > 0)) {
 		ret = submit_cmd_sync(yld, cp, clen);
-		if (ret != 0)
-			continue;
-		ret = submit_int_sync(yld, ip, ilen);
+		if (ret == 0)
+			ret = submit_int_sync(yld, ip, ilen);
 		if ((ret == 0) && (ip->cmd != cp->cmd))
 			ret = -ENOMSG;
+		if ((ret != 0) && (repeat > 0))
+			msleep_interruptible(YEALINK_COMMAND_DELAY_G2);
 	}
 	if (ret == -ENOMSG)
 		err("%s - command 0x%02x, reply 0x%02x", __FUNCTION__,
-							ip->cmd, cp->cmd);
+							cp->cmd, ip->cmd);
 	return ret;
 }
 
