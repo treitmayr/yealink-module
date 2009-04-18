@@ -1757,13 +1757,16 @@ static int update_version_init(struct yealink_dev *yld)
 	sprintf(yld->uniq, "%04x", version);
 
 	/* prepare the INIT command */
-	memset(ctl_data, 0, len);
 	ctl_data->cmd = CMD_INIT;
 	if (proto == yld_ctl_protocol_g1) {
 		ctl_data->g1.size = sizeof(ctl_data->g1.data);
 		ctl_data->g1.offset = 0;
 	}
 	pkt_update_checksum(ctl_data, len);
+
+	/* P1KH: Delay the next command to avoid 0xfd error responses! */
+	if (proto == yld_ctl_protocol_g2)
+		msleep_interruptible(4 * YEALINK_COMMAND_DELAY_G2);
 
 	ret = submit_cmd_int_sync(yld, ctl_data, len, int_data, len);
 	if (ret != 0)
