@@ -807,7 +807,7 @@ static int submit_cmd_int_sync(struct yealink_dev *yld,
 		if ((ret == 0) && (ip->cmd != cp->cmd))
 			ret = -ENOMSG;
 		if ((ret != 0) && (repeat > 0))
-			msleep_interruptible(YEALINK_COMMAND_DELAY_G2);
+			msleep_interruptible(4 * YEALINK_COMMAND_DELAY_G2);
 	}
 	if (ret == -ENOMSG)
 		err("%s - command 0x%02x, reply 0x%02x", __FUNCTION__,
@@ -1715,6 +1715,7 @@ static int update_version_init(struct yealink_dev *yld)
 	}
 
 	/* prepare the VERSION command */
+	memset(ctl_data, 0, len);
 	ctl_data->cmd = CMD_VERSION;
 	if (proto == yld_ctl_protocol_g1) {
 		ctl_data->g1.size = 2;
@@ -1756,6 +1757,7 @@ static int update_version_init(struct yealink_dev *yld)
 	sprintf(yld->uniq, "%04x", version);
 
 	/* prepare the INIT command */
+	memset(ctl_data, 0, len);
 	ctl_data->cmd = CMD_INIT;
 	if (proto == yld_ctl_protocol_g1) {
 		ctl_data->g1.size = sizeof(ctl_data->g1.data);
