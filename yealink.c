@@ -84,7 +84,7 @@
 #error "Need kernel version 2.6.18 or higher"
 #endif
 
-#define DRIVER_VERSION	"20090418"
+#define DRIVER_VERSION	"20100719"
 #define DRIVER_AUTHOR	"Thomas Reitmayr, Henk Vergonet"
 #define DRIVER_DESC	"Yealink phone driver"
 
@@ -166,7 +166,7 @@ struct model_info {
 	char *name;
 	int (*keycode)(unsigned scancode);
 	enum yld_ctl_protocols protocol;
-	int (*fcheck)(unsigned yld_status_offset);
+	int (*fcheck)(size_t yld_status_offset);
 };
 
 struct yealink_dev {
@@ -234,10 +234,10 @@ static int map_p1k_to_key(unsigned);
 static int map_p4k_to_key(unsigned);
 static int map_b2k_to_key(unsigned);
 static int map_p1kh_to_key(unsigned);
-static int check_feature_p1k(unsigned);
-static int check_feature_p4k(unsigned);
-static int check_feature_b2k(unsigned);
-static int check_feature_p1kh(unsigned);
+static int check_feature_p1k(size_t);
+static int check_feature_p4k(size_t);
+static int check_feature_b2k(size_t);
+static int check_feature_p1kh(size_t);
 
 /* model_info_idx_* have to match index in static model structure (below) */
 enum model_info_idx {
@@ -646,7 +646,7 @@ static void report_key(struct yealink_dev *yld, int key)
  * Yealink model features
  ******************************************************************************/
 
-static int check_feature_p1k(unsigned offset)
+static int check_feature_p1k(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
@@ -658,7 +658,7 @@ static int check_feature_p1k(unsigned offset)
 		offset == offsetof(struct yld_status, ringtone);
 }
 
-static int check_feature_p1kh(unsigned offset)
+static int check_feature_p1kh(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
@@ -669,7 +669,7 @@ static int check_feature_p1kh(unsigned offset)
 		offset == offsetof(struct yld_status, ringtone);
 }
 
-static int check_feature_p4k(unsigned offset)
+static int check_feature_p4k(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
@@ -681,7 +681,7 @@ static int check_feature_p4k(unsigned offset)
 		offset == offsetof(struct yld_status, dialtone);
 }
 
-static int check_feature_b2k(unsigned offset)
+static int check_feature_b2k(size_t offset)
 {
 	return  offset == offsetof(struct yld_status, led) ||
 		offset == offsetof(struct yld_status, pstn) ||
