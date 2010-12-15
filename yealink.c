@@ -84,7 +84,7 @@
 #error "Need kernel version 2.6.18 or higher"
 #endif
 
-#define DRIVER_VERSION	"20080819"
+#define DRIVER_VERSION	"20101214"
 #define DRIVER_AUTHOR	"Thomas Reitmayr, Henk Vergonet"
 #define DRIVER_DESC	"Yealink phone driver"
 
@@ -166,7 +166,7 @@ struct model_info {
 	char *name;
 	int (*keycode)(unsigned scancode);
 	enum yld_ctl_protocols protocol;
-	int (*fcheck)(unsigned yld_status_offset);
+	int (*fcheck)(size_t yld_status_offset);
 };
 
 struct yealink_dev {
@@ -189,7 +189,9 @@ struct yealink_dev {
 	union yld_ctl_packet	*ctl_data;
 	dma_addr_t		ctl_dma;
 	struct usb_ctrlrequest	*ctl_req;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 	dma_addr_t		ctl_req_dma;
+#endif
 	struct urb		*urb_ctl;
 
 	/* flags */
@@ -234,10 +236,10 @@ static int map_p1k_to_key(unsigned);
 static int map_p4k_to_key(unsigned);
 static int map_b2k_to_key(unsigned);
 static int map_p1kh_to_key(unsigned);
-static int check_feature_p1k(unsigned);
-static int check_feature_p4k(unsigned);
-static int check_feature_b2k(unsigned);
-static int check_feature_p1kh(unsigned);
+static int check_feature_p1k(size_t);
+static int check_feature_p4k(size_t);
+static int check_feature_b2k(size_t);
+static int check_feature_p1kh(size_t);
 
 /* model_info_idx_* have to match index in static model structure (below) */
 enum model_info_idx {
@@ -646,7 +648,7 @@ static void report_key(struct yealink_dev *yld, int key)
  * Yealink model features
  ******************************************************************************/
 
-static int check_feature_p1k(unsigned offset)
+static int check_feature_p1k(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
@@ -658,7 +660,7 @@ static int check_feature_p1k(unsigned offset)
 		offset == offsetof(struct yld_status, ringtone);
 }
 
-static int check_feature_p1kh(unsigned offset)
+static int check_feature_p1kh(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
@@ -669,7 +671,7 @@ static int check_feature_p1kh(unsigned offset)
 		offset == offsetof(struct yld_status, ringtone);
 }
 
-static int check_feature_p4k(unsigned offset)
+static int check_feature_p4k(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
@@ -681,7 +683,7 @@ static int check_feature_p4k(unsigned offset)
 		offset == offsetof(struct yld_status, dialtone);
 }
 
-static int check_feature_b2k(unsigned offset)
+static int check_feature_b2k(size_t offset)
 {
 	return  offset == offsetof(struct yld_status, led) ||
 		offset == offsetof(struct yld_status, pstn) ||
@@ -2038,13 +2040,25 @@ static int usb_cleanup(struct yealink_dev *yld, int err)
 	}
 
 	if (yld->ctl_req)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 		usb_buffer_free(yld->udev, sizeof(*(yld->ctl_req)),
 		                yld->ctl_req, yld->ctl_req_dma);
+#else
+		kfree(yld->ctl_req);
+#endif
 	if (yld->ctl_data)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 		usb_buffer_free(yld->udev, USB_PKT_LEN(yld->model->protocol),
+#else
+		usb_free_coherent(yld->udev, USB_PKT_LEN(yld->model->protocol),
+#endif
 		                yld->ctl_data, yld->ctl_dma);
 	if (yld->irq_data)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 		usb_buffer_free(yld->udev, USB_PKT_LEN(yld->model->protocol),
+#else
+		usb_free_coherent(yld->udev, USB_PKT_LEN(yld->model->protocol),
+#endif
 		                yld->irq_data, yld->irq_dma);
 
 	usb_free_urb(yld->urb_irq);
@@ -2168,18 +2182,30 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		return usb_cleanup(yld, -ENOMEM);
 
 	/* allocate usb buffers */
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 	yld->irq_data = usb_buffer_alloc(udev, pkt_len,
+#else
+	yld->irq_data = usb_alloc_coherent(udev, pkt_len,
+#endif
 					GFP_ATOMIC, &yld->irq_dma);
 	if (yld->irq_data == NULL)
 		return usb_cleanup(yld, -ENOMEM);
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 	yld->ctl_data = usb_buffer_alloc(udev, pkt_len,
+#else
+	yld->ctl_data = usb_alloc_coherent(udev, pkt_len,
+#endif
 					GFP_ATOMIC, &yld->ctl_dma);
 	if (!yld->ctl_data)
 		return usb_cleanup(yld, -ENOMEM);
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 	yld->ctl_req = usb_buffer_alloc(udev, sizeof(*(yld->ctl_req)),
 					GFP_ATOMIC, &yld->ctl_req_dma);
+#else
+	yld->ctl_req = kmalloc(sizeof(*(yld->ctl_req)), GFP_KERNEL);
+#endif
 	if (yld->ctl_req == NULL)
 		return usb_cleanup(yld, -ENOMEM);
 
@@ -2212,10 +2238,16 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	usb_fill_control_urb(yld->urb_ctl, udev, usb_sndctrlpipe(udev, 0),
 			(void *)yld->ctl_req, yld->ctl_data, pkt_len,
 			urb_ctl_callback, yld);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 	yld->urb_ctl->setup_dma	= yld->ctl_req_dma;
+#endif
 	yld->urb_ctl->transfer_dma	= yld->ctl_dma;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34)
 	yld->urb_ctl->transfer_flags	|= URB_NO_SETUP_DMA_MAP |
 					URB_NO_TRANSFER_DMA_MAP;
+#else
+	yld->urb_ctl->transfer_flags	|= URB_NO_TRANSFER_DMA_MAP;
+#endif
 	yld->urb_ctl->dev = udev;
 
 	/* set up the periodic scan/update timer */
