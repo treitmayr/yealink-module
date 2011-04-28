@@ -2150,7 +2150,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	spin_lock_init(&yld->flags_lock);
 	mutex_init(&yld->pm_mutex);
-	init_MUTEX_LOCKED(&yld->usb_active_sem);
+	sema_init(&yld->usb_active_sem, 0);
 
 	yld->udev = udev;
 	yld->intf = intf;
@@ -2326,6 +2326,9 @@ static struct usb_driver yealink_driver = {
 	.reset_resume	= usb_reset_resume,
 #endif
 	.id_table	= usb_table,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
+	.supports_autosuspend = 1,
+#endif
 };
 
 static int __init yealink_dev_init(void)
