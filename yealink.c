@@ -60,6 +60,8 @@
  *			added B2K keymap,
  *			thanks mmikel for testing with the P1KH.
  *   20080809 Thomas	Added support for B3G.
+ *   20140523 Slavek	Updated dev_warn/info/.. macros to support Linux versions
+ *                      up to at least 3.14.
  *
  * TODO:
  *   - P1KH: Better understand how the ring notes have to be set up.
@@ -105,18 +107,28 @@
 #define YEALINK_COMMAND_DELAY_G2	25	/* in [ms] */
 
 /* Make sure we have the following macros (independent of kernel versions) */
-#ifndef warn
-#define warn(format, arg...) printk(KERN_WARNING KBUILD_MODNAME ": " \
+#ifndef dev_dbg
+#define dev_dbg(dev, format, arg...) printk(KERN_DEBUG KBUILD_MODNAME ": " \
 	format "\n" , ## arg)
 #endif
 
-#ifndef info
-#define info(format, arg...) printk(KERN_INFO KBUILD_MODNAME ": " \
+#ifndef dev_err
+#define dev_err(dev, format, arg...) printk(KERN_ERR KBUILD_MODNAME ": " \
+	format "\n" , ## arg)
+#endif
+
+#ifndef dev_warn
+#define dev_warn(dev, format, arg...) printk(KERN_WARNING KBUILD_MODNAME ": " \
+	format "\n" , ## arg)
+#endif
+
+#ifndef dev_info
+#define dev_info(dev, format, arg...) printk(KERN_INFO KBUILD_MODNAME ": " \
 	format "\n" , ## arg)
 #endif
 
 /* for in-depth debugging */
-#define YEALINK_DBG_FLAGS(p) dbg("%s t=%d,u=%d,s=%d,p=%d",(p),yld->timer_expired,\
+#define YEALINK_DBG_FLAGS(p) dev_dbg(&yld->intf->dev, "%s t=%d,u=%d,s=%d,p=%d",(p),yld->timer_expired,\
 				yld->update_active,yld->scan_active,yld->usb_pause)
 
 
@@ -766,7 +778,7 @@ static int submit_cmd_sync(struct yealink_dev *yld,
 	else if (ret >= 0)
 		ret = -ENODATA;
 	if (ret != 0)
-		err("%s - usb_submit_urb failed %d (cmd 0x%02x)",
+		dev_err(&yld->intf->dev, "%s - usb_submit_urb failed %d (cmd 0x%02x)",
 			__FUNCTION__, ret, p->cmd);
 	return ret;
 }
@@ -782,16 +794,16 @@ static int submit_int_sync(struct yealink_dev *yld,
 		YEALINK_USB_INT_TIMEOUT);
 	if (ret == 0) {
 		if (len != act_len) {
-			err("%s - short packet %d/%d", __FUNCTION__,
+			dev_err(&yld->intf->dev, "%s - short packet %d/%d", __FUNCTION__,
 				act_len, len);
 			ret = -ENODATA;
 		}
 		if (pkt_verify_checksum(p, len) != 0) {
-			err("%s - invalid checksum", __FUNCTION__);
+			dev_err(&yld->intf->dev, "%s - invalid checksum", __FUNCTION__);
 			ret = -EBADMSG;
 		}
 	} else {
-		err("%s - usb_interrupt_msg failed %d", __FUNCTION__, ret);
+		dev_err(&yld->intf->dev, "%s - usb_interrupt_msg failed %d", __FUNCTION__, ret);
 	}
 	return ret;
 }
@@ -812,7 +824,7 @@ static int submit_cmd_int_sync(struct yealink_dev *yld,
 			msleep_interruptible(4 * YEALINK_COMMAND_DELAY_G2);
 	}
 	if (ret == -ENOMSG)
-		err("%s - command 0x%02x, reply 0x%02x", __FUNCTION__,
+		dev_err(&yld->intf->dev, "%s - command 0x%02x, reply 0x%02x", __FUNCTION__,
 							cp->cmd, ip->cmd);
 	return ret;
 }
@@ -840,7 +852,7 @@ static int submit_scan_request(struct yealink_dev *yld, int mem_flags)
 
 	ret = usb_submit_urb(yld->urb_ctl, mem_flags);
 	if (ret != 0)
-		err("%s - usb_submit_urb failed %d", __FUNCTION__, ret);
+		dev_err(&yld->intf->dev, "%s - usb_submit_urb failed %d", __FUNCTION__, ret);
 	return ret;
 }
 
@@ -1070,7 +1082,7 @@ static int poke_update_from_userspace(struct yealink_dev *yld)
 		if (likely(!yld->shutdown))
 			ret = submit_scan_request(yld, GFP_KERNEL);
 	} else {
-		dbg("   no update/scan required");
+		dev_dbg(&yld->intf->dev, "   no update/scan required");
 	}
 	return ret;
 }
@@ -1121,13 +1133,13 @@ static int perform_single_update_g1(struct yealink_dev *yld)
 		if (likely(!yld->shutdown))
 			ret = usb_submit_urb(yld->urb_ctl, GFP_ATOMIC);
 	} else if (!yld->open) {
-		dbg("   stopping usb traffic");
+		dev_dbg(&yld->intf->dev, "   stopping usb traffic");
 		up(&yld->usb_active_sem);	// @@@
 	} else if (do_scan) {
 		if (likely(!yld->shutdown))
 			ret = submit_scan_request(yld, GFP_ATOMIC);
 	} else {
-		dbg("   pausing updates");
+		dev_dbg(&yld->intf->dev, "   pausing updates");
 	}
 
 	return ret;
@@ -1162,10 +1174,10 @@ static int perform_single_update_g2(struct yealink_dev *yld)
 		if (likely(!yld->shutdown))
 			ret = usb_submit_urb(yld->urb_ctl, GFP_ATOMIC);
 	} else if (!yld->open) {
-		dbg("   stopping usb traffic");
+		dev_dbg(&yld->intf->dev, "   stopping usb traffic");
 		up(&yld->usb_active_sem);	// @@@
 	} else {
-		dbg("   pausing updates");
+		dev_dbg(&yld->intf->dev, "   pausing updates");
 	}
 
 	return ret;
@@ -1195,7 +1207,7 @@ static void timer_callback_g1(unsigned long ylda)
 	YEALINK_DBG_FLAGS("  ");
 
 	if (unlikely(timer_expired))
-		warn("timeout was not serviced in time!");
+		dev_warn(&yld->intf->dev, "timeout was not serviced in time!");
 
 	if (likely(!yld->shutdown)) {
 		mod_timer(&yld->timer, jiffies + yld->timer_delay);
@@ -1204,7 +1216,7 @@ static void timer_callback_g1(unsigned long ylda)
 		}
 	}
 	if (ret)
-		err("%s - urb submission failed %d", __FUNCTION__, ret);
+		dev_err(&yld->intf->dev, "%s - urb submission failed %d", __FUNCTION__, ret);
 }
 
 /* Timer callback function (G2 devices)
@@ -1220,7 +1232,7 @@ static void timer_callback_g2(unsigned long ylda)
 
 	ret = perform_single_update_g2(yld);
 	if (ret)
-		err("%s - urb submission failed %d", __FUNCTION__, ret);
+		dev_err(&yld->intf->dev, "%s - urb submission failed %d", __FUNCTION__, ret);
 }
 
 /*
@@ -1244,7 +1256,7 @@ static void urb_irq_callback(struct urb *urb)
 	if (unlikely(status)) {
 		if (status == -ESHUTDOWN)
 			return;
-		err("%s - urb status %d", __FUNCTION__, status);
+		dev_err(&yld->intf->dev, "%s - urb status %d", __FUNCTION__, status);
 		goto send_next;		/* do not process the irq_data */
 	}
 
@@ -1252,7 +1264,7 @@ static void urb_irq_callback(struct urb *urb)
 		yld->irq_data->cmd, data0);
 
 	if (unlikely(pkt_verify_checksum(yld->irq_data, USB_PKT_LEN(proto)) != 0)) {
-		warn("Received packet with invalid checksum, dropping it");
+		dev_warn(&yld->intf->dev, "Received packet with invalid checksum, dropping it");
 		goto send_next;		/* do not process the irq_data */
 	}
 
@@ -1305,15 +1317,15 @@ static void urb_irq_callback(struct urb *urb)
 			report_key(yld, ret);
 #endif
 		if (ret < 0 && data0 != 0xff)
-			warn("unknown scancode 0x%02x", data0);
+			dev_warn(&yld->intf->dev, "unknown scancode 0x%02x", data0);
 		break;
 
 	case STATE_BAD_PKT:
-		warn("phone received invalid command packet");
+		dev_warn(&yld->intf->dev, "phone received invalid command packet");
 		break;
 
 	default:
-		err("unexpected response %x", yld->irq_data->cmd);
+		dev_err(&yld->intf->dev, "unexpected response %x", yld->irq_data->cmd);
 	}
 
 send_next:
@@ -1325,7 +1337,7 @@ send_next:
 			ret = usb_submit_urb(yld->urb_irq, GFP_ATOMIC);
 	}
 	if (ret)
-		err("%s - urb submission failed %d", __FUNCTION__, ret);
+		dev_err(&yld->intf->dev, "%s - urb submission failed %d", __FUNCTION__, ret);
 }
 
 /* Control URB callback function
@@ -1345,7 +1357,7 @@ static void urb_ctl_callback(struct urb *urb)
 	if (unlikely(status)) {
 		if (status == -ESHUTDOWN)
 			return;
-		err("%s - urb status %d", __FUNCTION__, status);
+		dev_err(&yld->intf->dev, "%s - urb status %d", __FUNCTION__, status);
 	}
 
 	if (yld->model->protocol == yld_ctl_protocol_g2) {
@@ -1370,7 +1382,7 @@ static void urb_ctl_callback(struct urb *urb)
 	}
 
 	if (ret)
-		err("%s - urb submission failed %d", __FUNCTION__, ret);
+		dev_err(&yld->intf->dev, "%s - urb submission failed %d", __FUNCTION__, ret);
 }
 
 /*******************************************************************************
@@ -1630,7 +1642,7 @@ static ssize_t store_ringtone(struct device *dev,
 			ret = -ERESTARTSYS;
 	} else {
 		yld->usb_pause = 0;
-		err("Could not stop update cycle to write ringnotes!");
+		dev_err(&yld->intf->dev, "Could not stop update cycle to write ringnotes!");
 	}
 
 	up_write(&sysfs_rwsema);
@@ -1746,13 +1758,13 @@ static int update_version_init(struct yealink_dev *yld)
 	}
 	if (!yld->model) {
 		int pid = le16_to_cpu(yld->udev->descriptor.idProduct);
-		warn("Yealink model not supported: "
+		dev_warn(&yld->intf->dev, "Yealink model not supported: "
 			"PID %04x, version 0x%04x.", pid, version);
 		ret = -ENODEV;
 		goto leave_clean;
 	}
 
-	info("Detected Model USB-%s (Version 0x%04x)",
+	dev_info(&yld->intf->dev, "Detected Model USB-%s (Version 0x%04x)",
 		yld->model->name, version);
 	strcpy(yld->name, "Yealink USB-");
 	strcat(yld->name, yld->model->name);
@@ -1784,7 +1796,7 @@ static int update_version_init(struct yealink_dev *yld)
 	for (i = 0; i < len; i++) {
 	  sprintf(yld->uniq+4+(i*2), "%02x", data[i]);
 	}
-	info("Serial Number %s", yld->uniq+4);
+	dev_info(&yld->intf->dev, "Serial Number %s", yld->uniq+4);
 
 	/* calculate the model-specific timer delay */
 	if (proto == yld_ctl_protocol_g1) {
@@ -1925,11 +1937,11 @@ static int input_open(struct input_dev *dev)
 	int ret;
 	int i;
 
-	dbg("**** input_open ****");
+	dev_dbg(&yld->intf->dev, "**** input_open ****");
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 	ret = usb_autopm_get_interface(yld->intf);
 	if (ret < 0) {
-		err("%s - cannot autoresume, result %d",
+		dev_err(&yld->intf->dev, "%s - cannot autoresume, result %d",
 		    __FUNCTION__, ret);
 		return ret;
 	}
@@ -1938,12 +1950,12 @@ static int input_open(struct input_dev *dev)
 	mutex_lock(&yld->pm_mutex);
 	i = 20;
 	while ((ret = down_trylock(&yld->usb_active_sem)) && i--) {
-		dbg("waiting...");
+		dev_dbg(&yld->intf->dev, "waiting...");
 		msleep_interruptible(100);
 	}
 	//ret = down_timeout(&yld->usb_active_sem, HZ * 2);
 	if (ret != 0) {
-		err("%s - cannot acquire semaphore", __FUNCTION__);
+		dev_err(&yld->intf->dev, "%s - cannot acquire semaphore", __FUNCTION__);
 		return -ERESTARTSYS;
 	}
 	init_state(yld);
@@ -2168,7 +2180,7 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		yld->model = &model[model_info_idx_p1kh];
 	} else {
 		int pid = le16_to_cpu(udev->descriptor.idProduct);
-		info("Yealink model not supported: PID %04x, payload size %d.",
+		dev_info(&yld->intf->dev, "Yealink model not supported: PID %04x, payload size %d.",
 			pid, pkt_len);
 		return usb_cleanup(yld, -ENODEV);
 	}
@@ -2306,12 +2318,12 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	/* Register sysfs hooks (don't care about failure) */
 	ret = sysfs_create_group(&intf->dev.kobj, &yld_attr_group);
 
-	dbg("%s - register input device", __FUNCTION__);
+	dev_dbg(&yld->intf->dev, "%s - register input device", __FUNCTION__);
 	ret = input_register_device(input_dev);
 	if (ret)
 		return usb_cleanup(yld, ret);
 
-	dbg("%s - done", __FUNCTION__);
+	dev_dbg(&yld->intf->dev, "%s - done", __FUNCTION__);
 
 	return 0;
 }
@@ -2335,7 +2347,8 @@ static int __init yealink_dev_init(void)
 {
 	int ret = usb_register(&yealink_driver);
 	if (ret == 0)
-		info(DRIVER_DESC ": " DRIVER_VERSION " (C) " DRIVER_AUTHOR);
+		printk(KERN_INFO KBUILD_MODNAME ": "
+			DRIVER_DESC ": " DRIVER_VERSION " (C) " DRIVER_AUTHOR "\n");
 	return ret;
 }
 
