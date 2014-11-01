@@ -34,7 +34,8 @@ test: modules
 		done
 
 tar:
-	tar jcvf yealink.tar.bz2 README TODO Makefile *.[ch]
+	rev=$$(svn info | grep "Revision" | awk '{print $$2}'); \
+	tar jcvf yealink-r$${rev}.tar.bz2 README TODO Makefile *.[ch]
 
 dist:
 	vers=`grep 'define  *DRIVER_VERSION' yealink.c` ; \
