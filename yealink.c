@@ -64,6 +64,8 @@
  *                      up to at least 3.14.
  *   20211013 Slavek	Update code for new timer API.
  *                      This allows to build with the kernel >= 4.15.
+ *   20211014 Slavek	Use macro sizeof_field instead of FIELD_SIZEOF.
+ *                      This allows to build with the kernel >= 5.5.
  *
  * TODO:
  *   - P1KH: Better understand how the ring notes have to be set up.
@@ -88,7 +90,7 @@
 #error "Need kernel version 2.6.18 or higher"
 #endif
 
-#define DRIVER_VERSION	"20211013"
+#define DRIVER_VERSION	"20211014"
 #define DRIVER_AUTHOR	"Thomas Reitmayr, Henk Vergonet"
 #define DRIVER_DESC	"Yealink phone driver"
 
@@ -112,6 +114,10 @@
 #ifndef dev_info
 #define dev_info(dev, format, arg...) printk(KERN_INFO KBUILD_MODNAME ": " \
 	format "\n" , ## arg)
+#endif
+
+#ifndef sizeof_field
+#define sizeof_field FIELD_SIZEOF
 #endif
 
 /* for in-depth debugging */
@@ -652,7 +658,7 @@ static int check_feature_p1k(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
-			  FIELD_SIZEOF(struct yld_status, lcd)) ||
+			  sizeof_field(struct yld_status, lcd)) ||
 		offset == offsetof(struct yld_status, led) ||
 		offset == offsetof(struct yld_status, keynum) ||
 		offset == offsetof(struct yld_status, ringvol) ||
@@ -664,7 +670,7 @@ static int check_feature_p1kh(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
-			  FIELD_SIZEOF(struct yld_status, lcd)) ||
+			  sizeof_field(struct yld_status, lcd)) ||
 		offset == offsetof(struct yld_status, led) ||
 		offset == offsetof(struct yld_status, ringvol) ||
 		offset == offsetof(struct yld_status, ringnote_mod) ||
@@ -675,7 +681,7 @@ static int check_feature_p4k(size_t offset)
 {
 	return  (offset >= offsetof(struct yld_status, lcd) &&
 		 offset < offsetof(struct yld_status, lcd) +
-			  FIELD_SIZEOF(struct yld_status, lcd)) ||
+			  sizeof_field(struct yld_status, lcd)) ||
 		/*offset == offsetof(struct yld_status, led) ||*/
 		offset == offsetof(struct yld_status, backlight) ||
 		offset == offsetof(struct yld_status, speaker) ||
