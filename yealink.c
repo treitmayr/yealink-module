@@ -107,21 +107,6 @@
 #define YEALINK_COMMAND_DELAY_G2	25	/* in [ms] */
 
 /* Make sure we have the following macros (independent of kernel versions) */
-#ifndef dev_dbg
-#define dev_dbg(dev, format, arg...) printk(KERN_DEBUG KBUILD_MODNAME ": " \
-	format "\n" , ## arg)
-#endif
-
-#ifndef dev_err
-#define dev_err(dev, format, arg...) printk(KERN_ERR KBUILD_MODNAME ": " \
-	format "\n" , ## arg)
-#endif
-
-#ifndef dev_warn
-#define dev_warn(dev, format, arg...) printk(KERN_WARNING KBUILD_MODNAME ": " \
-	format "\n" , ## arg)
-#endif
-
 #ifndef dev_info
 #define dev_info(dev, format, arg...) printk(KERN_INFO KBUILD_MODNAME ": " \
 	format "\n" , ## arg)
