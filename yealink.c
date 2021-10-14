@@ -62,6 +62,8 @@
  *   20080809 Thomas	Added support for B3G.
  *   20140523 Slavek	Updated dev_warn/info/.. macros to support Linux versions
  *                      up to at least 3.14.
+ *   20211013 Slavek	Update code for new timer API.
+ *                      This allows to build with the kernel >= 4.15.
  *
  * TODO:
  *   - P1KH: Better understand how the ring notes have to be set up.
@@ -86,7 +88,7 @@
 #error "Need kernel version 2.6.18 or higher"
 #endif
 
-#define DRIVER_VERSION	"20140523"
+#define DRIVER_VERSION	"20211013"
 #define DRIVER_AUTHOR	"Thomas Reitmayr, Henk Vergonet"
 #define DRIVER_DESC	"Yealink phone driver"
 
@@ -199,6 +201,7 @@ struct yealink_dev {
 
 	unsigned	scan_active:1;
 	unsigned	update_active:1;
+	unsigned	timer_active:1;
 	unsigned	timer_expired:1;
 	unsigned	usb_pause:1;
 	spinlock_t	flags_lock;	/* protects above flags */
@@ -1172,14 +1175,25 @@ static int perform_single_update_g2(struct yealink_dev *yld)
  * 
  * This function submits a pending key scan command.
  */
-static void timer_callback_g1(unsigned long ylda)
+static void timer_callback_g1
+(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
+    unsigned long ylda
+#else
+    struct timer_list *t
+#endif
+)
 {
 	struct yealink_dev *yld;
 	int timer_expired, idle;
 	int do_submit;
 	int ret = 0;
 
+#	if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
 	yld = (struct yealink_dev *)ylda;
+#	else
+	yld = from_timer(yld, t, timer);
+#	endif
 
 	YEALINK_DBG_FLAGS("T:");
 	spin_lock_irq(&yld->flags_lock);
@@ -1208,12 +1222,24 @@ static void timer_callback_g1(unsigned long ylda)
  * 
  * This function submits a pending key scan command.
  */
-static void timer_callback_g2(unsigned long ylda)
+static void timer_callback_g2
+(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
+    unsigned long ylda
+#else
+    struct timer_list *t
+#endif
+)
+
 {
 	struct yealink_dev *yld;
 	int ret;
 
+#	if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
 	yld = (struct yealink_dev *)ylda;
+#	else
+	yld = from_timer(yld, t, timer);
+#	endif
 
 	ret = perform_single_update_g2(yld);
 	if (ret)
@@ -1881,8 +1907,10 @@ static void stop_traffic(struct yealink_dev *yld)
 
 	usb_kill_urb(yld->urb_irq);
 	usb_kill_urb(yld->urb_ctl);
-	if (yld->timer.data != (unsigned long) NULL)
+	if (yld->timer_active) {
 		del_timer_sync(&yld->timer);
+		yld->timer_active = 0;
+	}
 
 	yld->shutdown = 0;
 	smp_wmb();
@@ -1974,8 +2002,10 @@ static void input_close(struct input_dev *dev)
 	//stop_traffic(yld);
 	yld->shutdown = 1;
 	smp_wmb();			/* make sure other CPUs see this */
-	if (yld->timer.data != (unsigned long) NULL)
+	if (yld->timer_active) {
 		del_timer_sync(&yld->timer);
+		yld->timer_active = 0;
+	}
 	yld->shutdown = 0;
 	smp_wmb();
 
@@ -2248,10 +2278,18 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	yld->urb_ctl->dev = udev;
 
 	/* set up the periodic scan/update timer */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
 	setup_timer(&yld->timer,
 		    (proto == yld_ctl_protocol_g1) ? timer_callback_g1 :
 						     timer_callback_g2,
 		    (unsigned long) yld);
+#else
+	timer_setup(&yld->timer,
+		    (proto == yld_ctl_protocol_g1) ? timer_callback_g1 :
+						     timer_callback_g2,
+		    0);
+#endif
+	yld->timer_active = 1;
 
 	/* find out the physical bus location */
 	usb_make_path(udev, yld->phys, sizeof(yld->phys));
