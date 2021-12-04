@@ -1,6 +1,8 @@
-#MAKE_OPTS = -C /usr/src/linux SUBDIRS=`pwd` V=1
-#MAKE_OPTS = -C /usr/src/linux SUBDIRS=`pwd`
-MAKE_OPTS = -C /usr/src/linux-`uname -r` M=`pwd` SUBDIRS=`pwd`
+BUILD_DIR := /usr/src/linux-$(shell uname -r)
+ifeq ("$(wildcard $(BUILD_DIR))","")
+	BUILD_DIR := /lib/modules/$(shell uname -r)/build
+endif
+MAKE_OPTS = -C $(BUILD_DIR) M=`pwd` SUBDIRS=`pwd`
 PATH_SYSFS := $(shell find /sys/ -name get_icons | sed 's/\/get_icons//')
 #EXTRA_CFLAGS += -DDEBUG -O0 -g -Wall
 SHELL := $(shell which bash)
@@ -14,9 +16,10 @@ clean:
 	make $(MAKE_OPTS) $@
 
 test: modules
-	modprobe uhci_hcd ; echo -n
-	modprobe evdev ; echo -n
-	rmmod yealink ; echo -n
+	[ "$(PATH_SYSFS)" ] || { echo "No device connected, aborting tests."; false; }
+	modprobe uhci_hcd || :
+	modprobe evdev || :
+	rmmod yealink || :
 	insmod yealink.ko
 	sleep 1
 	cat $(PATH_SYSFS)/model
