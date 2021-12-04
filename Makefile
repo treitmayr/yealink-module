@@ -1,6 +1,6 @@
 #MAKE_OPTS = -C /usr/src/linux SUBDIRS=`pwd` V=1
 #MAKE_OPTS = -C /usr/src/linux SUBDIRS=`pwd`
-MAKE_OPTS = -C /usr/src/linux-`uname -r` SUBDIRS=`pwd`
+MAKE_OPTS = -C /usr/src/linux-`uname -r` M=`pwd` SUBDIRS=`pwd`
 PATH_SYSFS := $(shell find /sys/ -name get_icons | sed 's/\/get_icons//')
 #EXTRA_CFLAGS += -DDEBUG -O0 -g -Wall
 SHELL := $(shell which bash)

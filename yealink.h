@@ -36,7 +36,7 @@ struct yld_ctl_packet_g1 {
 } __attribute__ ((packed));
 
 #define USB_PKT_LEN_G1		sizeof(struct yld_ctl_packet_g1)
-#define USB_PKT_DATA_LEN_G1	FIELD_SIZEOF(struct yld_ctl_packet_g1, data)
+#define USB_PKT_DATA_LEN_G1	sizeof_field(struct yld_ctl_packet_g1, data)
 
 /* "Generation 2" models use 8 byte packets */
 
@@ -47,7 +47,7 @@ struct yld_ctl_packet_g2 {
 } __attribute__ ((packed));
 
 #define USB_PKT_LEN_G2		sizeof(struct yld_ctl_packet_g2)
-#define USB_PKT_DATA_LEN_G2	FIELD_SIZEOF(struct yld_ctl_packet_g2, data)
+#define USB_PKT_DATA_LEN_G2	sizeof_field(struct yld_ctl_packet_g2, data)
 
 union yld_ctl_packet {
 	u8	cmd;		/* command code is always the first byte */
