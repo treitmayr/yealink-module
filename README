@@ -13,10 +13,10 @@ USB-B3K  USB 1.1 telbox, ATA adapter for PSTN
 For manufacturer documentation see http://www.yealink.com/
 
 The original development branch can be found at:
-http://cvs.savannah.gnu.org/viewcvs/usbb2k-api/yealink-module/
+https://cvs.savannah.gnu.org/viewcvs/usbb2k-api/yealink-module/
 
 The updated sources supporting the P1KH and B3G can be found at:
-http://www.devbase.at/svn/view.cgi/yealink-module/?root=voip
+https://github.com/treitmayr/yealink-module
 
 
 Matrix of supported features:
