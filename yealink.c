@@ -2,7 +2,7 @@
  * drivers/usb/input/yealink.c
  *
  * Copyright (c) 2005,2006 Henk Vergonet <Henk.Vergonet@gmail.com>
- *               2008      Thomas Reitmayr <treitmayr@devbase.at>
+ *               2023      Thomas Reitmayr <treitmayr@devbase.at>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -66,6 +66,7 @@
  *                      This allows to build with the kernel >= 4.15.
  *   20211014 Slavek	Use macro sizeof_field instead of FIELD_SIZEOF.
  *                      This allows to build with the kernel >= 5.5.
+ *   20230131 Thomas	Update to support kernel versions up to 6.1.
  *
  * TODO:
  *   - P1KH: Better understand how the ring notes have to be set up.
@@ -90,7 +91,7 @@
 #error "Need kernel version 2.6.18 or higher"
 #endif
 
-#define DRIVER_VERSION	"20211014"
+#define DRIVER_VERSION	"20230131"
 #define DRIVER_AUTHOR	"Thomas Reitmayr, Henk Vergonet"
 #define DRIVER_DESC	"Yealink phone driver"
 
@@ -118,6 +119,10 @@
 
 #ifndef sizeof_field
 #define sizeof_field FIELD_SIZEOF
+#endif
+
+#ifndef fallthrough
+#define fallthrough do {} while (0)  /* fallthrough */
 #endif
 
 /* for in-depth debugging */
@@ -1292,6 +1297,7 @@ static void urb_irq_callback(struct urb *urb)
 			break;
 		/* prepare to fall through (B3G) */
 		data0 = yld->irq_data->g1.data[1];
+		fallthrough;
 
 	case CMD_HANDSET:
 		/* B2K + B3G (fall-through) */
@@ -1309,6 +1315,7 @@ static void urb_irq_callback(struct urb *urb)
 		/* prepare to fall through (B2K & B3G) */
 		data0 = (yld->model->name == b2k_model) ? (~data0 << 3) :
 				(yld->irq_data->g1.data[2] << 4);
+		fallthrough;
 
 	case CMD_HOOKPRESS:
 		/* P4K + B2K+B3G (fall-through) */
@@ -2191,7 +2198,11 @@ static int usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	/* get a handle to the interrupt data pipe */
 	pipe = usb_rcvintpipe(udev, endpoint->bEndpointAddress);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0)
+	pkt_len = usb_maxpacket(udev, pipe);
+#else
 	pkt_len = usb_maxpacket(udev, pipe, usb_pipeout(pipe));
+#endif
 
 	if (pkt_len == USB_PKT_LEN_G1) {
 		proto = yld_ctl_protocol_g1;
