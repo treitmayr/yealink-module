@@ -81,6 +81,22 @@ Check it out at [https://www.devbase.at/past-projects/yeaphone](https://www.devb
 
 ## Compilation
 
+### Using DKMS
+
+The following commands will fetch, compile, and install the kernel module.
+```
+git clone https://github.com/treitmayr/yealink-module.git
+version=$(grep -Po 'PACKAGE_VERSION=\K.*' yealink-module/dkms.conf)
+sudo mv yealink-module /usr/src/yealink-$version
+sudo dkms add yealink/$version
+sudo dkms build yealink/$version
+sudo dkms install --force yealink/$version
+sudo dkms status | grep yealink
+```
+Note that this will *replace* the yealink kernel module shipped with your Linux distribution, but you may still be able to find the original file in one of the directories `/var/lib/dkms/yealink/original_module/*/*/`.
+
+### Using Plain make
+
 In order to build the yealink.ko kernel module, just invoke
 
 ```
@@ -88,7 +104,6 @@ make
 ```
 
 Note that it should not be necessary to install or build a full-blown Linux kernel source tree!
-
 
 ### Troubleshooting
 
