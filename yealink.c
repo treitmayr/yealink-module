@@ -91,13 +91,21 @@
 #error "Need kernel version 2.6.18 or higher"
 #endif
 
-#define DRIVER_VERSION	"20230131"
+#define DRIVER_VERSION	"20260511"
 #define DRIVER_AUTHOR	"Thomas Reitmayr, Henk Vergonet"
 #define DRIVER_DESC	"Yealink phone driver"
 
 #define USB_YEALINK_VENDOR_ID	0x6993
 #define USB_YEALINK_PRODUCT_ID1	0xb001
 #define USB_YEALINK_PRODUCT_ID2	0xb700
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
+#define timer_delete_sync del_timer_sync
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,16,0)
+#define timer_container_of from_timer
+#endif
 
 /* Timeout used for synchronous reads from interrupt endpoint */
 #define YEALINK_USB_INT_TIMEOUT		200	/* in [ms] */
@@ -1203,7 +1211,7 @@ static void timer_callback_g1
 #	if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
 	yld = (struct yealink_dev *)ylda;
 #	else
-	yld = from_timer(yld, t, timer);
+	yld = timer_container_of(yld, t, timer);
 #	endif
 
 	YEALINK_DBG_FLAGS("T:");
@@ -1249,7 +1257,7 @@ static void timer_callback_g2
 #	if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
 	yld = (struct yealink_dev *)ylda;
 #	else
-	yld = from_timer(yld, t, timer);
+	yld = timer_container_of(yld, t, timer);
 #	endif
 
 	ret = perform_single_update_g2(yld);
@@ -1921,7 +1929,7 @@ static void stop_traffic(struct yealink_dev *yld)
 	usb_kill_urb(yld->urb_irq);
 	usb_kill_urb(yld->urb_ctl);
 	if (yld->timer_active) {
-		del_timer_sync(&yld->timer);
+		timer_delete_sync(&yld->timer);
 		yld->timer_active = 0;
 	}
 
@@ -2016,7 +2024,7 @@ static void input_close(struct input_dev *dev)
 	yld->shutdown = 1;
 	smp_wmb();			/* make sure other CPUs see this */
 	if (yld->timer_active) {
-		del_timer_sync(&yld->timer);
+		timer_delete_sync(&yld->timer);
 		yld->timer_active = 0;
 	}
 	yld->shutdown = 0;
