@@ -67,6 +67,7 @@
  *   20211014 Slavek	Use macro sizeof_field instead of FIELD_SIZEOF.
  *                      This allows to build with the kernel >= 5.5.
  *   20230131 Thomas	Update to support kernel versions up to 6.1.
+ *   20260511 Slavek	Update to support kernel versions >= 6.16.
  *
  * TODO:
  *   - P1KH: Better understand how the ring notes have to be set up.
