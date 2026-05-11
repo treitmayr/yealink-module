@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create source tarball
+        run: |
+          git archive \
+            --format=tar.gz \
+            --prefix="yealink-module-${{ steps.version.outputs.version }}/" \
+            --output="yealink-module-${{ steps.version.outputs.version }}.tar.gz" \
+            HEAD
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "default-cache-ttl 7200" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye || true
+
+      - name: Sign tarball
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          gpg --batch \
+              --yes \
+              --pinentry-mode loopback \
+              --passphrase "$GPG_PASSPHRASE" \
+              --detach-sign \
+              --armor \
+              "yealink-module-${{ steps.version.outputs.version }}.tar.gz"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "yealink-module ${{ steps.version.outputs.version }}" \
+            --notes-from-tag \
+            "yealink-module-${{ steps.version.outputs.version }}.tar.gz" \
+            "yealink-module-${{ steps.version.outputs.version }}.tar.gz.asc"
